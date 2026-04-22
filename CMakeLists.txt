@@ -13,6 +13,7 @@ add_executable(detect
     src/feature_tracker.cpp
     src/motion_segmenter.cpp
     src/bbox_estimator.cpp
+    src/silhouette_refiner.cpp
     src/evaluator.cpp
 )
 target_link_libraries(detect ${OpenCV_LIBS})

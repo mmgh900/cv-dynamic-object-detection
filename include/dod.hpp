@@ -35,6 +35,24 @@ cv::Rect estimateBBox(const std::vector<TrackedPoint>& tracks,
                       const std::vector<int>& dynamic_idx,
                       const cv::Size& img_size);
 
+// Returns the per-cluster bounding boxes discovered by the clustering
+// stage (those with at least `min_pts` supporting keypoints). Used for
+// diagnostic visualisation — the final single-bbox prediction still
+// comes from `estimateBBox`.
+std::vector<cv::Rect> clusterBBoxes(const std::vector<TrackedPoint>& tracks,
+                                    const std::vector<int>& dynamic_idx,
+                                    const cv::Size& img_size,
+                                    int min_pts = 3);
+
+// silhouette_refiner.cpp
+// Takes a coarse bbox from estimateBBox and refines it using a
+// pixel-level motion mask (phase-correlation-warped absdiff + Otsu +
+// morphology + connected components). Falls back to the coarse box if
+// the refinement is implausible.
+cv::Rect refineBBoxSilhouette(const std::vector<cv::Mat>& frames_gray,
+                              const cv::Rect& coarse_box,
+                              const cv::Size& img_size);
+
 // evaluator.cpp
 struct EvalResult {
     std::string category;

@@ -70,7 +70,9 @@ static RunOutput processCategory(const std::string& category,
     std::vector<TrackedPoint> tracks;
     trackFeatures(gray, tracks);
     auto dyn = classifyDynamicTracks(gray, tracks);
-    cv::Rect pred = estimateBBox(tracks, dyn, r.img_size);
+    cv::Rect coarse = estimateBBox(tracks, dyn, r.img_size);
+    cv::Rect pred   = refineBBoxSilhouette(gray, coarse, r.img_size);
+    auto all_clusters = clusterBBoxes(tracks, dyn, r.img_size);
 
     cv::Rect gt = readGT(label_dir + "/0000.txt");
     r.gt = gt; r.pred = pred;
@@ -84,8 +86,20 @@ static RunOutput processCategory(const std::string& category,
     // Overlay image: GT green, prediction red, tracks orange/red.
     cv::Mat overlay = first_color.clone();
     drawTracks(overlay, tracks, dyn);
+    // Thin yellow boxes: every motion cluster the system found. Helps
+    // show the "multiple moving sub-objects merged into one" behaviour
+    // required by the spec (e.g. two squirrels, multiple sheep).
+    for (const auto& cb : all_clusters)
+        cv::rectangle(overlay, cb, cv::Scalar(0, 255, 255), 1);
     if (gt.area() > 0) cv::rectangle(overlay, gt, cv::Scalar(0, 255, 0), 2);
     if (pred.area() > 0) cv::rectangle(overlay, pred, cv::Scalar(0, 0, 255), 2);
+
+    std::cout << "   clusters=" << all_clusters.size();
+    for (const auto& cb : all_clusters)
+        std::cout << " [" << cb.x << "," << cb.y
+                  << "," << cb.width << "x" << cb.height << "]";
+    std::cout << "\n";
+
     std::stringstream txt;
     txt << category << "  IoU=" << std::fixed << std::setprecision(3) << r.iou;
     cv::putText(overlay, txt.str(), cv::Point(10, 25),

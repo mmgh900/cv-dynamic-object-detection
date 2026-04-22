@@ -51,7 +51,13 @@ std::vector<int> classifyDynamicTracks(const std::vector<cv::Mat>& frames_gray,
     std::sort(items.begin(), items.end(),
               [](const Item& a, const Item& b){ return a.score > b.score; });
 
-    double floor_disp = std::max(6.0, 3.0 * median);
+    // Floor chosen to reject small background motions (swaying leaves,
+    // minor parallax, people in the background). Raised from 3x median
+    // to 4x and absolute floor from 6 px to 8 px after the professor's
+    // clarification that the detector must ignore minor bg motion and
+    // near-static objects (e.g. the almost-static sheep in the sheep
+    // sequence).
+    double floor_disp = std::max(8.0, 4.0 * median);
     int target = std::max(6, (int)(items.size() * 0.15));
     target = std::min(target, (int)items.size());
 

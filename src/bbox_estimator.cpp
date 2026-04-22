@@ -137,10 +137,13 @@ cv::Rect estimateBBox(const std::vector<TrackedPoint>& tracks,
         std::nth_element(dy.begin(), dy.begin()+dy.size()/2, dy.end());
         float madx = std::max(6.f, dx[dx.size()/2]);
         float mady = std::max(6.f, dy[dy.size()/2]);
+        // Tightened from 3.0 to 2.5 after observing that over-extent
+        // of the bbox was the dominant failure mode on bird/sheep.
+        const float k_mad = 2.5f;
         std::vector<cv::Point2f> kept;
         for (const auto& p : cluster) {
-            if (std::fabs(p.x - mx) <= 3.0f * madx &&
-                std::fabs(p.y - my) <= 3.0f * mady) {
+            if (std::fabs(p.x - mx) <= k_mad * madx &&
+                std::fabs(p.y - my) <= k_mad * mady) {
                 kept.push_back(p);
             }
         }
@@ -156,6 +159,42 @@ cv::Rect estimateBBox(const std::vector<TrackedPoint>& tracks,
     box.width += 2 * pad_x; box.height += 2 * pad_y;
     box &= cv::Rect(0, 0, img_size.width, img_size.height);
     return box;
+}
+
+// Diagnostic: return every cluster's bounding box (not just the winner).
+// Uses the same proximity-clustering as estimateBBox; the threshold and
+// min-points settings are kept in sync.
+std::vector<cv::Rect> clusterBBoxes(const std::vector<TrackedPoint>& tracks,
+                                    const std::vector<int>& dynamic_idx,
+                                    const cv::Size& img_size,
+                                    int min_pts) {
+    std::vector<cv::Rect> out;
+    if (dynamic_idx.empty()) return out;
+
+    std::vector<cv::Point2f> pts;
+    pts.reserve(dynamic_idx.size());
+    for (int i : dynamic_idx) pts.push_back(tracks[i].first);
+
+    float diag = std::sqrt((float)(img_size.width * img_size.width
+                                 + img_size.height * img_size.height));
+    float eps = std::max(20.f, diag * 0.08f);
+    auto labels = proximityCluster(pts, eps, min_pts);
+
+    std::map<int, std::vector<cv::Point2f>> by_label;
+    for (size_t i = 0; i < labels.size(); ++i)
+        if (labels[i] > 0) by_label[labels[i]].push_back(pts[i]);
+    for (auto& kv : by_label) {
+        if ((int)kv.second.size() < min_pts) continue;
+        cv::Rect r = cv::boundingRect(kv.second);
+        // Small padding consistent with estimateBBox.
+        int pad_x = std::max(4, r.width / 8);
+        int pad_y = std::max(4, r.height / 8);
+        r.x -= pad_x; r.y -= pad_y;
+        r.width += 2 * pad_x; r.height += 2 * pad_y;
+        r &= cv::Rect(0, 0, img_size.width, img_size.height);
+        if (r.area() > 0) out.push_back(r);
+    }
+    return out;
 }
 
 } // namespace dod

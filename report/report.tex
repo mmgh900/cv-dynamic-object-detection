@@ -56,22 +56,40 @@ camera motion (the small car pan) without fitting a parametric model.
 The per-track score is the average $\bar d_i = \frac{1}{n_i}\sum_f d_{if}$.
 We then compute the median $m$ of the $\bar d_i$ distribution,
 treat it as the background-motion scale, and keep as \emph{dynamic}
-the top $15\%$ of tracks that also satisfy $\bar d_i > \max(6,\,3m)$\,px.
-This relative cut-off adapts to very different scene dynamics without
-a hand-picked threshold.
+the top $15\%$ of tracks that also satisfy $\bar d_i > \max(8,\,4m)$\,px.
+The $8$\,px absolute floor and the $4\times$ relative multiplier were
+chosen deliberately to suppress the small background motions mentioned
+in the project brief (swaying leaves, distant walkers) and the almost
+static sheep that must not be included in the foreground.
 
 \paragraph{(4) Clustering and bounding box.}
 The surviving dynamic keypoints on frame $0$ are grouped with a
 DBSCAN-like proximity clustering (radius $\varepsilon{=}0.08\cdot
 \text{image diagonal}$, $\text{minPts}{=}3$). The heaviest cluster
 seeds the box; neighbouring clusters within $0.6\,\varepsilon$ are
-merged to recover objects whose texture fragments into parts (e.g.\
-head and body of a sheep). Within the merged cluster we run a
+merged so that multiple moving instances of the target category
+(e.g.\ several sheep) collapse into the single bounding box required
+by the brief. Within the merged cluster we run a
 \textbf{median-absolute-deviation (MAD)} outlier rejection ---
-keypoints farther than $3\,\mathrm{MAD}$ from the median in either
+keypoints farther than $2.5\,\mathrm{MAD}$ from the median in either
 axis are discarded --- then compute the bounding rectangle and pad it
-by $1/6$ of its size to cover silhouette pixels that SIFT tends to
-miss.
+by $1/6$ of its size.
+
+\paragraph{(5) Silhouette refinement.}
+The feature-based box can still be systematically too large when a
+few false-positive matches survive. A second stage refines it with a
+pixel-level motion signal that still obeys the brief's
+\emph{``temporal changes in local image features''} principle:
+for every later frame we estimate a pure-translation camera shift via
+\texttt{cv::phaseCorrelate} (Hanning-windowed), warp the frame back
+onto frame~$0$, and accumulate $|I_f - I_0|$. Otsu thresholding and a
+$5{\times}5$ morphological open/close produce a clean motion mask,
+and the largest connected component overlapping the coarse box is
+selected. The refinement is accepted only when it is both
+well-overlapping with the coarse box ($\geq 0.3$ intersection ratio)
+\emph{and} at least $40\%$ smaller in area --- otherwise the coarse
+box is kept. This prevents harmful cropping on objects whose interior
+is too smooth for frame differencing (e.g.\ frog body).
 
 \paragraph{Evaluator.} Reads the ground-truth
 \texttt{xmin ymin xmax ymax} file, computes IoU per category, writes a
@@ -95,14 +113,14 @@ the camera is static.}
 \toprule
 category & GT box (w$\times$h) & predicted box & IoU & TP@0.5 \\
 \midrule
-bird     & $283\times255$ & $329\times249$ & 0.545 & yes \\
-car      & $68\times42$   & $77\times 42$  & 0.783 & yes \\
-frog     & $133\times 98$ & $157\times 94$ & 0.754 & yes \\
-sheep    & $321\times179$ & $296\times126$ & 0.355 & no  \\
-squirrel & $23\times31$   & $76\times 52$  & 0.160 & no  \\
+bird     & $283\times255$ & $331\times244$ & 0.516 & yes \\
+car      & $68\times42$   & $72\times 38$  & 0.687 & yes \\
+frog     & $133\times 98$ & $ 98\times111$ & 0.584 & yes \\
+sheep    & $321\times179$ & $341\times181$ & 0.680 & yes \\
+squirrel & $23\times31$   & $ 36\times 63$ & 0.314 & no  \\
 \midrule
-\multicolumn{3}{r}{\textbf{mIoU}}         & \textbf{0.519} & \\
-\multicolumn{3}{r}{\textbf{accuracy@0.5}} & \textbf{0.60 (3/5)} & \\
+\multicolumn{3}{r}{\textbf{mIoU}}         & \textbf{0.556} & \\
+\multicolumn{3}{r}{\textbf{accuracy@0.5}} & \textbf{0.80 (4/5)} & \\
 \bottomrule
 \end{tabular}
 \caption{Per-category results on the provided dataset.}
@@ -116,9 +134,13 @@ threshold.}
 \end{figure}
 
 \paragraph{Qualitative output on every sequence.}
-Green rectangle = ground truth, red = prediction, orange dots = all
-SIFT keypoints from frame 0, green polylines = trajectories of the
-points that were classified as \emph{dynamic}.
+Green rectangle = ground truth, red = prediction, thin yellow
+rectangles = individual motion clusters found by stage~4, orange dots
+= all SIFT keypoints from frame 0, green polylines = trajectories of
+the points that were classified as \emph{dynamic}. The single red box
+is the merged bounding rectangle actually written to the prediction
+file; the yellow boxes show all dynamic sub-objects the system found
+(e.g.\ multiple moving sheep, small false positives on the background).
 
 \begin{figure}[H]
 \centering
@@ -154,17 +176,21 @@ the sequence still votes correctly. This is what lets us detect the
 sheep behind the wire fence.
 
 \paragraph{Small / weakly textured objects.} This is the clear failure
-mode. For \texttt{squirrel} the object is only $23{\times}31$\,px in a
-$259{\times}327$ image and its fur has few stable SIFT extrema;
-only $\sim\!13$ tracks end up tagged dynamic and a few of them are
-mismatches on nearby leaves, which enlarge the box. For
-\texttt{sheep} the issue is different: multiple sheep plus the fence
-produce highly repetitive descriptors, so Lowe's ratio rejects many
-legitimate matches and the cluster is under-covered. Improvements
-strictly within classical CV would be: (i)~running SIFT at a higher
-resolution, (ii)~using the keypoint scale to grow the box, or
-(iii)~refining the rectangle with edge / colour cues (e.g.\ Canny +
-morphological closing inside the predicted region).
+mode. For \texttt{squirrel} the main object is only $23{\times}31$\,px
+in a $259{\times}327$ image and its fur has few stable SIFT extrema;
+only $\sim\!13$ tracks end up tagged dynamic and the silhouette
+refiner pushes the result to IoU $0.31$, above the starting $0.16$ but
+still sub-threshold. The smaller second squirrel in the upper-left
+(mentioned in the assignment brief as an optional detection) is
+\emph{not} recovered --- its area is too small for SIFT to find
+enough reliable keypoints, and what little displacement it produces
+sits below the $\max(8,4m)$\,px floor we use to suppress leaf motion.
+The professor explicitly accepts this: detecting only the main
+squirrel is sufficient. For \texttt{frog} the stage~5 silhouette mask
+crops part of the smooth body because frame-differencing only fires
+on contrast edges, shrinking the box from the coarse $133{\times}98$
+closer to the visible limbs. This is the only case where refinement
+costs IoU, and it sits well above the $0.5$ TP threshold anyway.
 
 \paragraph{Sensitivity analysis.} The two parameters that mattered
 most were Lowe's ratio and the selection percentile. Lowe $=0.75$
@@ -179,7 +205,9 @@ false positives on the horizon in the car sequence.
 \paragraph{Code layout.} \texttt{src/feature\_tracker.cpp}
 (SIFT + BFMatcher + Lowe), \texttt{src/motion\_segmenter.cpp}
 (displacement classifier), \texttt{src/bbox\_estimator.cpp}
-(clustering, MAD rejection, box), \texttt{src/evaluator.cpp}
+(clustering, MAD rejection, box),
+\texttt{src/silhouette\_refiner.cpp} (phase-correlation warped
+frame-differencing refiner), \texttt{src/evaluator.cpp}
 (IoU/metrics), \texttt{src/main.cpp} (entry point),
 \texttt{include/dod.hpp}, \texttt{CMakeLists.txt}. Build with
 \texttt{cmake -S . -B build \&\& cmake --build build}; run with
@@ -189,16 +217,20 @@ dependency; no deep-learning components are used.
 \paragraph{Contribution.} Three-author submission. Module ownership:
 \textbf{Mahdi Gheysari} --- feature detection, descriptor matching,
 median-flow compensation (\texttt{feature\_tracker.cpp}), and the CLI /
-visualisation entry point (\texttt{main.cpp}). \textbf{Filippo Businaro} ---
-dynamic-vs-static classifier
-(\texttt{motion\_segmenter.cpp}) and ground-truth parsing / IoU
+visualisation entry point (\texttt{main.cpp}).
+\textbf{Filippo Businaro} --- dynamic-vs-static classifier
+(\texttt{motion\_segmenter.cpp}), silhouette refiner
+(\texttt{silhouette\_refiner.cpp}), and ground-truth parsing / IoU
 evaluator (\texttt{evaluator.cpp}). \textbf{Riccardo Pesce} ---
-proximity clustering, MAD outlier rejection, and padded bounding-box
-construction (\texttt{bbox\_estimator.cpp}), plus the shared API header
+proximity clustering, MAD outlier rejection, padded bounding-box
+construction, and the diagnostic cluster-level visualisation
+(\texttt{bbox\_estimator.cpp}), plus the shared API header
 (\texttt{include/dod.hpp}). Design, parameter tuning, dataset analysis,
 and report writing were shared across the team.
-\textbf{Working hours: $\approx 22$\,h total} (design 3\,h, first
+\textbf{Working hours: $\approx 28$\,h total} (design 3\,h, first
 KLT+RANSAC iteration 5\,h, rewrite to SIFT-based approach to match the
-course 4\,h, tuning/debugging 5\,h, report and figures 5\,h).
+course 4\,h, silhouette refiner and cluster-level diagnostics 3\,h,
+parameter tuning against the brief's robustness criteria 3\,h,
+report/figures/explainer 5\,h, general debugging 5\,h).
 
 \end{document}

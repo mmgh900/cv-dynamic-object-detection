@@ -15,21 +15,28 @@ a moving object in the first frame of an RGB image sequence using
    across matched keypoints is subtracted from each match to cancel
    any constant camera translation (covers the slight car pan).
 4. **Dynamic classification** – average residual displacement per
-   track; keep the top 15% above `max(6 px, 3 × median)`.
+   track; keep the top 15% above `max(8 px, 4 × median)`. The floor is
+   tuned to reject swaying leaves, distant walkers, and near-static
+   objects (e.g. the almost-static sheep) as required by the brief.
 5. **Clustering + bbox** – DBSCAN-like proximity clustering, neighbour
-   merging, MAD outlier rejection, padded bounding box.
+   merging, MAD outlier rejection at 2.5σ, padded bounding box. All
+   individual clusters are also exposed for diagnostic visualisation.
+6. **Silhouette refinement** – phase-correlation warped frame
+   differencing + Otsu + morphology + largest connected component,
+   gated so it only replaces the coarse box when the refined box
+   overlaps well and is meaningfully smaller.
 
 ## Results on the provided dataset
 
 | category | IoU | TP@0.5 |
 |----------|-----|--------|
-| bird     | 0.545 | yes |
-| car      | 0.783 | yes |
-| frog     | 0.754 | yes |
-| sheep    | 0.355 | no  |
-| squirrel | 0.160 | no  |
+| bird     | 0.516 | yes |
+| car      | 0.687 | yes |
+| frog     | 0.584 | yes |
+| sheep    | 0.680 | yes |
+| squirrel | 0.314 | no  |
 
-**mIoU = 0.519, accuracy@0.5 = 0.60 (3/5).**
+**mIoU = 0.556, accuracy@0.5 = 0.80 (4/5).**
 
 ## Build and run
 
@@ -61,7 +68,8 @@ include/dod.hpp
 src/
   feature_tracker.cpp   -- SIFT + BFMatcher + Lowe ratio + median flow
   motion_segmenter.cpp  -- displacement-percentile dynamic classifier
-  bbox_estimator.cpp    -- clustering + MAD + bbox
+  bbox_estimator.cpp    -- clustering + MAD + bbox + per-cluster helper
+  silhouette_refiner.cpp -- phase-correlation warped absdiff + Otsu refine
   evaluator.cpp         -- IoU, GT parsing
   main.cpp              -- CLI entry point
 CMakeLists.txt
@@ -81,6 +89,7 @@ CMakeLists.txt
 | `src/feature_tracker.cpp` | Mahdi Gheysari |
 | `src/motion_segmenter.cpp` | Filippo Businaro |
 | `src/bbox_estimator.cpp` | Riccardo Pesce |
+| `src/silhouette_refiner.cpp` | Filippo Businaro |
 | `src/evaluator.cpp` | Filippo Businaro |
 | `src/main.cpp` | Mahdi Gheysari |
 
