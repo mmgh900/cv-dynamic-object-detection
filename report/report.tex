@@ -11,7 +11,7 @@
 
 \title{\vspace{-2em}Feature Tracking and Dynamic Object Detection \\
 \large Computer Vision -- Mid-course Project}
-\author{Mahdi Gheysari}
+\author{Mahdi Gheysari \and Filippo Businaro \and Riccardo Pesce}
 \date{April 2026}
 
 \begin{document}
@@ -186,10 +186,19 @@ false positives on the horizon in the car sequence.
 \texttt{./build/detect dataset output}. OpenCV~4 is the only
 dependency; no deep-learning components are used.
 
-\paragraph{Contribution.} Single-author submission (Mahdi Gheysari):
-all ideas, implementation, tuning, evaluation, and report.
-\textbf{Working hours: $\approx 18$\,h} (design 2\,h, first
-KLT+RANSAC iteration 5\,h, rewrite to SIFT-based approach to match
-the course 4\,h, tuning/debugging 4\,h, report and figures 3\,h).
+\paragraph{Contribution.} Three-author submission. Module ownership:
+\textbf{Mahdi Gheysari} --- feature detection, descriptor matching,
+median-flow compensation (\texttt{feature\_tracker.cpp}), and the CLI /
+visualisation entry point (\texttt{main.cpp}). \textbf{Filippo Businaro} ---
+dynamic-vs-static classifier
+(\texttt{motion\_segmenter.cpp}) and ground-truth parsing / IoU
+evaluator (\texttt{evaluator.cpp}). \textbf{Riccardo Pesce} ---
+proximity clustering, MAD outlier rejection, and padded bounding-box
+construction (\texttt{bbox\_estimator.cpp}), plus the shared API header
+(\texttt{include/dod.hpp}). Design, parameter tuning, dataset analysis,
+and report writing were shared across the team.
+\textbf{Working hours: $\approx 22$\,h total} (design 3\,h, first
+KLT+RANSAC iteration 5\,h, rewrite to SIFT-based approach to match the
+course 4\,h, tuning/debugging 5\,h, report and figures 5\,h).
 
 \end{document}

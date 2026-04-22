@@ -1,6 +1,9 @@
 // Author: Mahdi Gheysari
-// Entry point. Runs the full pipeline on every dataset category and
-// writes predictions, overlay images, and an evaluation report.
+// Module owner: Mahdi Gheysari (CLI entry, per-category orchestration,
+// visualisation overlays).
+//
+// Runs the full pipeline on every dataset category and writes
+// predictions, overlay images, and an evaluation report.
 
 #include "dod.hpp"
 #include <opencv2/imgproc.hpp>

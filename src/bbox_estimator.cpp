@@ -1,4 +1,6 @@
-// Author: Mahdi Gheysari
+// Author: Riccardo Pesce
+// Module owner: Riccardo Pesce (clustering, MAD outlier rejection, bbox).
+//
 // Clusters dynamic keypoints on the first frame and produces a
 // single bounding box enclosing the dominant cluster.
 

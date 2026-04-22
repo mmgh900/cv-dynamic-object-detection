@@ -1,4 +1,6 @@
 // Author: Mahdi Gheysari
+// Module owner: Mahdi Gheysari (feature detection, matching, median-flow).
+//
 // SIFT feature extraction + nearest-neighbour descriptor matching with
 // Lowe's ratio test. Produces, for every keypoint detected in the first
 // frame, its tracked position in subsequent frames by chaining matches

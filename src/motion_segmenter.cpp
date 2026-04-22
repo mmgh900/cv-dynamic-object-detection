@@ -1,4 +1,6 @@
-// Author: Mahdi Gheysari
+// Author: Filippo Businaro
+// Module owner: Filippo Businaro (dynamic-vs-static classification of tracks).
+//
 // Classifies tracked keypoints as dynamic (on a moving object) vs.
 // static (background) using a displacement-percentile criterion.
 //

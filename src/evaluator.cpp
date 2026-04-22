@@ -1,5 +1,5 @@
-// Author: Mahdi Gheysari
-// Ground-truth IO and IoU metrics.
+// Author: Filippo Businaro
+// Module owner: Filippo Businaro (ground-truth I/O and IoU metrics).
 
 #include "dod.hpp"
 #include <fstream>

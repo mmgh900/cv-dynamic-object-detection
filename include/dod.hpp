@@ -1,3 +1,5 @@
+// Module owner: Riccardo Pesce (shared API — TrackedPoint struct and
+// cross-module function declarations).
 #pragma once
 #include <opencv2/opencv.hpp>
 #include <string>

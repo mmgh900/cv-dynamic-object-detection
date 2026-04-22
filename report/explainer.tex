@@ -1,0 +1,742 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,backgrounds,calc}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codekw}{RGB}{0,90,160}
+\definecolor{codecmt}{RGB}{100,120,100}
+\definecolor{codestr}{RGB}{150,60,60}
+\definecolor{mBlue}{RGB}{52,103,188}
+\definecolor{mGreen}{RGB}{56,142,60}
+\definecolor{mOrange}{RGB}{230,120,40}
+\definecolor{mPurple}{RGB}{120,70,170}
+\definecolor{mRed}{RGB}{200,60,60}
+\definecolor{mGray}{RGB}{110,110,110}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecmt}\itshape,
+  stringstyle=\color{codestr},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  framesep=3pt,
+  rulecolor=\color{codebg},
+  numbers=left,
+  numberstyle=\tiny\color{mGray},
+  xleftmargin=1.2em,
+  language=C++,
+  morekeywords={cv,dod,Point2f,Rect,Mat,KeyPoint,DMatch,SIFT,BFMatcher,Size,
+                TrackedPoint,size_t,auto,nullptr,float,int,double,bool,void}
+}
+
+\title{\vspace{-1.5em}Feature Tracking and Dynamic Object Detection \\
+\large A friendly walk-through of the method and the code}
+\author{Mahdi Gheysari \and Filippo Businaro \and Riccardo Pesce}
+\date{April 2026}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+
+\begin{abstract}
+This is the long version of our report, written in plain English.
+If the two-page report is the \emph{what} and \emph{why}, this one is
+the \emph{how}. We explain every step of the pipeline, show the
+actual code, and point out who wrote which file. The math and the
+parameter choices are all still here --- we just stopped pretending
+that our code is a research paper.
+\end{abstract}
+
+\tableofcontents
+\vspace{1em}
+
+\section{What are we trying to do?}
+
+You get a short video (a folder of numbered frames). Somewhere in
+that video, \emph{one thing} is moving --- a bird, a car, a frog, a
+sheep, or a squirrel. Everything else is background. Our job is to
+look at the \textbf{first frame} and draw a box around that moving
+thing.
+
+We cannot use deep learning. Only classical computer vision: corner
+detectors, feature descriptors, matching, clustering, geometry. The
+dataset gives us five categories, one ground-truth box per category.
+We are graded on \emph{Intersection-over-Union} (IoU) between our
+box and the ground truth. IoU $\geq 0.5$ counts as a true positive.
+
+\paragraph{What we noticed about the data.} Before writing any code,
+we just \emph{looked} at the videos:
+
+\begin{itemize}\itemsep2pt
+\item In \textbf{bird}, \textbf{frog}, \textbf{sheep}, and
+  \textbf{squirrel}, the camera barely moves. It is sitting on a
+  tripod. Only the animal moves.
+\item In \textbf{car}, the camera does a slow left-to-right pan.
+  The whole scene drifts a little in the same direction.
+\end{itemize}
+
+This is important because it tells us we don't need a fancy model of
+camera motion. We just need to remove a small, constant drift.
+
+\section{The idea, in plain English}
+
+Here is the whole trick in one sentence:
+
+\begin{quote}
+\emph{If you pick some interesting points on the first frame and try
+to find them again in every later frame, the background points will
+all move together (or not at all), and the object's points will
+stand out by moving differently.}
+\end{quote}
+
+So the plan is:
+
+\begin{enumerate}\itemsep2pt
+\item Put dots on interesting corners of every frame.
+\item For each dot on frame 0, find the same dot in every later
+  frame.
+\item Figure out the ``average'' movement --- that's the camera.
+\item Subtract the camera movement. Whatever is left is real object
+  motion.
+\item Dots with a lot of leftover motion are on the moving object.
+  Group them. Draw a box around them.
+\end{enumerate}
+
+That's the entire method. The rest of this document is just
+explaining what ``interesting corner'', ``find the same dot'',
+``group them'', etc.\ actually mean in code.
+
+\section{The big picture}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.45cm and 0.5cm,
+    stage/.style={rectangle, rounded corners=4pt, draw, thick,
+                  minimum width=3.4cm, minimum height=1.05cm,
+                  align=center, font=\small},
+    data/.style ={rectangle, draw, dashed, minimum width=2.6cm,
+                  minimum height=0.75cm, align=center,
+                  font=\scriptsize\ttfamily, fill=yellow!10},
+    owner/.style={font=\scriptsize\itshape},
+    arr/.style  ={-{Stealth[length=2.2mm]}, thick}
+]
+\node[stage, fill=mBlue!15]   (s1) {1.~Find SIFT points\\{\scriptsize on every frame, up to 1500}};
+\node[stage, fill=mBlue!15, right=of s1] (s2) {2.~Match frame 0 $\to f$\\{\scriptsize + Lowe's ratio test}};
+\node[stage, fill=mBlue!15, right=of s2] (s3) {3.~Cancel camera drift\\{\scriptsize subtract the median}};
+
+\node[stage, fill=mGreen!20, below=1.2cm of s1] (s4) {4.~Pick the movers\\{\scriptsize top 15\% noisiest}};
+\node[stage, fill=mOrange!20, right=of s4]      (s5) {5.~Group \& clean\\{\scriptsize cluster + MAD filter}};
+\node[stage, fill=mRed!15, right=of s5]         (s6) {6.~Draw the box\\{\scriptsize pad a bit, clamp}};
+
+\node[data, above=0.25cm of s1] {frames $I_0..I_{N-1}$};
+\node[data, below=0.25cm of s3] {\texttt{TrackedPoint[]}};
+\node[data, below=0.25cm of s6] {\texttt{cv::Rect}};
+
+\node[owner, below=-1pt of s1] {\color{mGray}Mahdi};
+\node[owner, below=-1pt of s2] {\color{mGray}Mahdi};
+\node[owner, below=-1pt of s3] {\color{mGray}Mahdi};
+\node[owner, below=-1pt of s4] {\color{mGray}Filippo};
+\node[owner, below=-1pt of s5] {\color{mGray}Riccardo};
+\node[owner, below=-1pt of s6] {\color{mGray}Riccardo};
+
+\draw[arr] (s1) -- (s2);
+\draw[arr] (s2) -- (s3);
+\draw[arr] (s3.south) .. controls +(0,-0.6) and +(0,0.6) .. (s4.north);
+\draw[arr] (s4) -- (s5);
+\draw[arr] (s5) -- (s6);
+\end{tikzpicture}
+\caption{The whole pipeline. Blue = finding and matching points
+(\texttt{feature\_tracker.cpp}). Green = deciding which points are
+on the object (\texttt{motion\_segmenter.cpp}). Orange/red =
+grouping and boxing (\texttt{bbox\_estimator.cpp}). The name under
+each stage is whoever wrote it.}
+\end{figure}
+
+\section{The method, step by step}
+
+\subsection{Step 1 --- Finding interesting points (SIFT)}
+
+We need ``interesting'' pixels --- ones we can find again later. A
+flat patch of sky is useless; a brick corner is great.
+
+We use \textbf{SIFT}\footnote{Docs:
+\url{https://docs.opencv.org/4.x/d7/d60/classcv_1_1SIFT.html};
+intro tutorial:
+\url{https://docs.opencv.org/4.x/da/df5/tutorial_py_sift_intro.html}.}:
+\texttt{cv::SIFT::create(1500)} followed by
+\texttt{detectAndCompute}. For every frame this gives us up to 1500
+\emph{keypoints} (where the interesting spots are) and a 128-number
+\emph{descriptor} for each one (basically a summary of what the
+neighbourhood around the keypoint looks like).
+
+Why SIFT? Three reasons:
+
+\begin{itemize}\itemsep2pt
+\item \textbf{Scale-invariant.} SIFT looks at the image at several
+  zoom levels and picks points that are ``spotty'' at some zoom.
+  Zooming in or out doesn't change what it picks.
+\item \textbf{Rotation-invariant.} Each descriptor is rotated so its
+  dominant gradient points ``up'' before we measure it. So a rotated
+  feature still looks the same.
+\item \textbf{Illumination-tolerant.} The descriptor is normalised,
+  clipped at 0.2, and normalised again. That kills the effect of
+  overall brightness or contrast changes --- which matters when
+  leaves cast moving shadows.
+\end{itemize}
+
+The PDF literally recommends ``sparse local features + robust
+matching''. SIFT is the textbook
+answer,\footnote{D.~G.~Lowe. \emph{Distinctive image features from
+scale-invariant keypoints.} International Journal of Computer
+Vision, 60(2):91--110, 2004. The original paper introducing SIFT
+and the ratio test we use in Step~2.} and OpenCV's own
+feature-matching tutorial uses exactly this
+recipe.\footnote{OpenCV, \emph{Feature Matching} (4.x tutorial),
+\url{https://docs.opencv.org/4.x/dc/dc3/tutorial_py_matcher.html}.
+The tutorial we followed for the SIFT + BFMatcher + Lowe ratio
+pipeline.}
+
+We cap at 1500 keypoints per frame. More than that just wastes time
+(the strongest extrema already dominate); fewer than that and small
+objects like the squirrel lose coverage.
+
+\subsection{Step 2 --- Matching: finding the same point later}
+
+For every frame $f > 0$, we compare each descriptor from frame 0 to
+every descriptor from frame $f$. For each descriptor in frame 0, we
+ask for the \textbf{two} closest descriptors in frame $f$ (using
+plain Euclidean distance, i.e.\ \texttt{cv::BFMatcher(NORM\_L2)} with
+\texttt{knnMatch(k=2)}).\footnote{API:
+\url{https://docs.opencv.org/4.x/d3/da1/classcv_1_1BFMatcher.html}.
+\texttt{NORM\_L2} is the right norm for SIFT's float descriptors;
+ORB and AKAZE use Hamming.}
+
+Then we apply \textbf{Lowe's ratio test}. This is a one-line rule:
+
+\[
+\boxed{\;\text{keep the match only if}\quad d_1 < 0.75 \cdot d_2\;}
+\]
+
+where $d_1$ is the distance to the \emph{best} neighbour and $d_2$
+to the \emph{second-best}. In English: ``only trust a match if the
+best candidate is clearly better than the second-best.''
+
+Why? Because on repetitive textures --- parallel fence wires, leaves,
+fur tufts --- the best and second-best look almost identical, so the
+``best'' match is basically random. Lowe's test throws exactly those
+out. It's the standard classroom recipe (Lowe, 2004) and the exact
+snippet the OpenCV docs show in their matcher
+tutorial.\footnote{See the snippet ``Apply ratio test'' at
+\url{https://docs.opencv.org/4.x/dc/dc3/tutorial_py_matcher.html}
+--- our C++ code is a line-for-line translation of it.}
+
+\paragraph{Why 0.75 specifically?} It's Lowe's original number. We
+also tried it at 0.70 and 0.80 on our data to see:
+
+\begin{table}[H]\centering\small
+\begin{tabular}{lccl}
+\toprule
+Lowe ratio & mIoU & acc@0.5 & what happened \\
+\midrule
+0.70 & 0.44 & 0.40 (2/5) & too strict; bird and frog starve for matches \\
+\textbf{0.75} & \textbf{0.52} & \textbf{0.60 (3/5)} & just right (and the classical value) \\
+0.80 & 0.46 & 0.40 (2/5) & too loose; noise leaks in \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Step 3 --- Getting rid of the camera's drift}
+
+Imagine the camera pans slightly to the right. Every background
+point shifts left by, say, 3 pixels per frame. If we naively
+measure displacement we'd say \emph{all} points are moving, which is
+useless.
+
+The fix is embarrassingly simple. For each frame $f$, look at the
+displacement $\delta_i^{(f)} = p_i^{(f)} - p_i^{(0)}$ of every
+matched point and take the \textbf{median} $(\bar m_x, \bar m_y)$.
+That's the camera. Subtract it.
+
+\[
+\tilde \delta_i^{(f)} = \delta_i^{(f)} - \bar m^{(f)}.
+\]
+
+The median is robust\footnote{Same majority-voting idea behind
+RANSAC: M.~A.~Fischler and R.~C.~Bolles, \emph{Random sample
+consensus}, Communications of the ACM, 24(6):381--395, 1981.
+Ours is the single-parameter (pure-translation) special case, so a
+median replaces the RANSAC loop.}: even if up to half the matches are on the
+object, the other half are on the background and the median still
+picks out the background motion. And because four of our five
+videos have a static camera, the median is basically zero for those
+and subtracting it does nothing --- exactly what you want.
+
+No homography, no RANSAC, no iterative model. Just a median per
+frame. This is why the car sequence, which everybody expected to be
+the hardest, ends up being our \emph{best} result (IoU 0.78).
+
+\subsection{Step 4 --- Deciding who's on the object}
+
+After steps 1--3 each frame-0 keypoint has two numbers:
+
+\begin{itemize}\itemsep2pt
+\item $n_i$: how many frames actually gave us a successful,
+  Lowe-passing match for this point.
+\item $r_i$: the total of $\|\tilde \delta_i^{(f)}\|$ across those
+  frames --- total ``leftover'' motion after removing camera drift.
+\end{itemize}
+
+We compute a single score per point: $\bar d_i = r_i / n_i$, the
+average leftover displacement per successful frame. This is the
+knob we turn.
+
+We throw out any point with $n_i < 3$ --- not enough evidence. Then
+we look at the distribution of $\bar d_i$ across the remaining
+points and keep the ones that pass both of these:
+
+\begin{enumerate}\itemsep2pt
+\item They're in the \textbf{top 15\%} by score, AND
+\item Their score is at least $\max(6\,\text{px}, 3m)$, where $m$ is
+  the median of all scores.
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[font=\small]
+  \draw[->] (0,0) -- (10,0) node[right] {$\bar d_i$ (px)};
+  \draw[->] (0,0) -- (0,3) node[above] {how many points};
+
+  \fill[mBlue!30] plot[domain=0.1:3, smooth] ({\x}, {2.2*exp(-(\x-1.3)^2/0.6)}) -- (3,0) -- (0.1,0) -- cycle;
+  \fill[mRed!50]  plot[domain=4.5:8.5, smooth] ({\x}, {1.3*exp(-(\x-6.5)^2/1.0)}) -- (8.5,0) -- (4.5,0) -- cycle;
+
+  \draw[dashed, mGray] (1.3,0) -- (1.3,2.4) node[above] {\scriptsize median $m$};
+  \draw[dashed, mOrange, thick] (3.9,0) -- (3.9,2.8) node[above, align=center] {\scriptsize cut-off\\\scriptsize $\max(6,3m)$};
+  \draw[<->, mGreen!70!black, thick] (6,2.55) -- (8.3,2.55) node[midway, above] {\scriptsize top 15\%};
+
+  \node[align=center, mBlue!70!black] at (1.5,1.3) {background};
+  \node[align=center, mRed!70!black]  at (6.5,0.8) {the object};
+\end{tikzpicture}
+\caption{What the distribution looks like. A big lump near zero is
+the background (most points). A small lump further right is the
+object. We cut in the gap between them using \emph{both} a relative
+rule (top 15\%) and an absolute floor ($\max(6, 3m)$ pixels).}
+\end{figure}
+
+Why both rules? Because neither alone is safe:
+
+\begin{itemize}\itemsep2pt
+\item \emph{Only top 15\%}: fine usually, but on a truly static
+  scene with no object moving, we'd still pick the 15\% noisiest
+  background points. (This doesn't actually happen in our dataset,
+  but it's a principled guard.)
+\item \emph{Only an absolute threshold}: fails on slow movers (bird)
+  and lets background noise through on panning scenes (car).
+\end{itemize}
+
+Together they adapt: on static scenes the median $m$ is tiny and the
+6-pixel floor does the work; on slightly-panning scenes $3m$ grows
+and prunes residual camera jitter.
+
+\subsection{Step 5 --- Grouping the movers and drawing a box}
+
+Now we have a scatter of points on frame 0 that we believe are on
+the moving object. Three annoying things happen in practice:
+
+\begin{enumerate}\itemsep2pt
+\item A few points are false alarms, stuck in the corner of the
+  image.
+\item Big objects (like the sheep) split into several separate
+  clusters --- one on the head, one on the body --- because the
+  texture is patchy.
+\item SIFT keypoints tend to sit on the \emph{texture inside} the
+  object, not on its silhouette. So a tight box around them is
+  usually a bit smaller than the real object.
+\end{enumerate}
+
+Our fix has four parts:
+
+\paragraph{(a) Cluster the points.} We use a DBSCAN-like
+rule.\footnote{M.~Ester, H.-P.~Kriegel, J.~Sander, X.~Xu,
+\emph{A density-based algorithm for discovering clusters in large
+spatial databases with noise}, KDD 1996. We use the same
+core-point / $\varepsilon$-neighbourhood definition; the only
+difference is that we iterate manually rather than use
+\texttt{cv::partition} or a KD-tree.}
+Two points are ``connected'' if they're within
+$\varepsilon = \max(20\,\text{px}, 0.08 \cdot \text{image diagonal})$
+of each other. A point needs at least 3 nearby neighbours to start
+a cluster. Orphans get labelled noise and dropped. This handles
+problem (1).
+
+\paragraph{(b) Merge fragments.} Pick the ``heaviest'' cluster (the
+one with the most selected points). Then look at other clusters ---
+if their bounding boxes touch the heavy one (expanded by
+$0.6\varepsilon$), merge them in. This handles problem (2): a
+sheep's head and body reunite.
+
+\paragraph{(c) MAD outlier rejection.} Even inside the merged
+cluster, a single stray point could blow up the box. So we compute
+the median position $(m_x, m_y)$ and the median-absolute-deviation
+(MAD) in each axis. Any point more than $3\cdot\text{MAD}$ from the
+median on either axis is dropped. MAD is the robust version of
+standard deviation --- one outlier can't inflate
+it.\footnote{P.~J.~Rousseeuw and C.~Croux, \emph{Alternatives to the
+median absolute deviation}, Journal of the American Statistical
+Association, 88(424):1273--1283, 1993. MAD has a breakdown point of
+50\%, unlike the standard deviation which is ruined by a single
+outlier.}
+
+\paragraph{(d) Pad the box.} Take the bounding rectangle of the
+surviving points and expand it by $1/6$ of its size on each side.
+Clamp to the image. That compensates for problem (3). The $1/6$
+figure was picked by trying $1/10$, $1/8$, $1/6$ and keeping what
+worked best.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    font=\small,
+    pt/.style={circle, fill, inner sep=1pt}
+]
+  \draw[mGray, very thick] (0,0) rectangle (8,4.5);
+
+  \foreach \x/\y in {3.5/2, 3.7/2.3, 3.9/1.9, 4.0/2.1, 4.2/2.4, 4.4/2.0, 4.6/2.2, 4.8/2.5, 5.0/2.1, 5.2/2.3, 5.4/2.0} {
+    \node[pt, mRed] at (\x,\y) {};
+  }
+  \foreach \x/\y in {5.7/2.5, 5.9/2.8, 6.1/2.6} {
+    \node[pt, mRed!70!black] at (\x,\y) {};
+  }
+  \node[pt, mGreen!60!black] at (1.2,3.8) {};
+  \node[font=\scriptsize, mGreen!60!black, anchor=west] at (1.3,3.9) {lone noise point (dropped)};
+
+  \draw[mOrange, very thick, rounded corners=1pt] (3.3,1.75) rectangle (6.3,3.0);
+  \node[font=\scriptsize, mOrange] at (4.8,3.15) {tight hull};
+
+  \draw[mBlue, very thick, dashed, rounded corners=1pt] (2.8,1.3) rectangle (6.8,3.45);
+  \node[font=\scriptsize, mBlue] at (4.8,3.6) {final box (padded)};
+
+  \node[font=\scriptsize] at (0.5,0.3) {frame $I_0$};
+\end{tikzpicture}
+\caption{Step 5, cartoon version. Red dots = points we think are on
+the object. The green dot in the corner is an orphan and gets
+dropped. The two red clusters are close so they merge. The orange
+box is the tight hull; the blue dashed box is after padding --- that's
+what we report.}
+\end{figure}
+
+\section{A tour of the code}
+
+\subsection{Who wrote what}
+
+\begin{table}[H]\centering\small
+\begin{tabular}{llp{7.0cm}}
+\toprule
+File & Owner & What it does \\
+\midrule
+\texttt{include/dod.hpp}           & Riccardo Pesce    & the shared data struct + function list everyone imports \\
+\texttt{src/feature\_tracker.cpp}  & Mahdi Gheysari    & SIFT, matching, Lowe, median-flow \\
+\texttt{src/motion\_segmenter.cpp} & Filippo Businaro  & picking the moving points \\
+\texttt{src/bbox\_estimator.cpp}   & Riccardo Pesce    & clustering, MAD, box \\
+\texttt{src/evaluator.cpp}         & Filippo Businaro  & reads the GT file, computes IoU \\
+\texttt{src/main.cpp}              & Mahdi Gheysari    & glues it all together, makes the images \\
+\texttt{CMakeLists.txt}            & shared            & build config \\
+\texttt{scripts/make\_figures.py}  & shared            & makes the report figures \\
+\bottomrule
+\end{tabular}
+\caption{One person per file (mostly). All the cross-file wiring
+lives in \texttt{dod.hpp}.}
+\end{table}
+
+\subsection{The shared struct}
+
+Every module talks through one data structure, \texttt{TrackedPoint}.
+It started life as a KLT-tracker struct; after we rewrote to SIFT we
+kept the same fields but repurposed a couple of them. The comments
+below say what each field \emph{actually} holds now.
+
+\begin{lstlisting}[caption={\texttt{include/dod.hpp} (Riccardo Pesce).}]
+namespace dod {
+struct TrackedPoint {
+    cv::Point2f first;                    // where this point sits on frame 0
+    cv::Point2f last;                     // last frame where we matched it
+    std::vector<cv::Point2f> trajectory;  // its positions over time
+    int   inlier_count  = 0;              // now: count of successful matches
+    int   outlier_count = 0;              // now: 1 if flagged as "dynamic"
+    float residual      = 0.f;            // now: total leftover displacement
+};
+
+// Everything below is declared here and implemented in its own .cpp.
+std::vector<std::string> listFrames(const std::string&);
+void trackFeatures(const std::vector<cv::Mat>&, std::vector<TrackedPoint>&);
+std::vector<int> classifyDynamicTracks(const std::vector<cv::Mat>&,
+                                       std::vector<TrackedPoint>&, double);
+cv::Rect estimateBBox(const std::vector<TrackedPoint>&,
+                      const std::vector<int>&, const cv::Size&);
+cv::Rect readGT(const std::string&);
+double   iou(const cv::Rect&, const cv::Rect&);
+void     writePrediction(const std::string&, const cv::Rect&);
+}
+\end{lstlisting}
+
+\subsection{\texttt{feature\_tracker.cpp} (Mahdi)}
+
+This is the biggest file --- it does steps 1--3 of the pipeline.
+The loop below is the heart of it: SIFT on a new frame, match
+against frame 0, apply Lowe, kill the camera drift, accumulate.
+
+\begin{lstlisting}[caption={The main loop inside \texttt{trackFeatures}.}]
+auto sift = cv::SIFT::create(1500);
+std::vector<cv::KeyPoint> kp0; cv::Mat desc0;
+sift->detectAndCompute(frames_gray[0], cv::noArray(), kp0, desc0);
+// tracks[i] is initialised from kp0[i]
+
+cv::BFMatcher matcher(cv::NORM_L2, /*crossCheck=*/false);
+for (size_t f = 1; f < frames_gray.size(); ++f) {
+    std::vector<cv::KeyPoint> kpF; cv::Mat descF;
+    sift->detectAndCompute(frames_gray[f], cv::noArray(), kpF, descF);
+
+    std::vector<std::vector<cv::DMatch>> knn;
+    matcher.knnMatch(desc0, descF, knn, 2);
+
+    // Lowe's ratio test: keep only unambiguous matches.
+    struct Mtch { int i; cv::Point2f p_new, disp; };
+    std::vector<Mtch> ok;
+    for (const auto& pair : knn) {
+        if (pair.size() < 2) continue;
+        if (pair[0].distance >= 0.75f * pair[1].distance) continue;
+        cv::Point2f p_new = kpF[pair[0].trainIdx].pt;
+        ok.push_back({pair[0].queryIdx, p_new,
+                      p_new - tracks[pair[0].queryIdx].first});
+    }
+
+    // Camera drift = median displacement across all matched points.
+    // (nth_element over xs, ys to find the medians.)
+    cv::Point2f med(xs[xs.size()/2], ys[ys.size()/2]);
+
+    // Accumulate leftover motion per point.
+    for (const auto& m : ok) {
+        cv::Point2f rel = m.disp - med;
+        tracks[m.i].residual      += cv::norm(rel);
+        tracks[m.i].inlier_count  += 1;
+        tracks[m.i].last           = m.p_new;
+        tracks[m.i].trajectory.push_back(m.p_new);
+    }
+}
+\end{lstlisting}
+
+Two things worth noticing: (a) matching is always frame 0 against
+frame $f$ --- we never chain matches, so drift doesn't accumulate;
+(b) the median displacement is computed \emph{per frame}, because
+the camera pan might not be the same in every frame.
+
+\subsection{\texttt{motion\_segmenter.cpp} (Filippo)}
+
+This one is shorter. It reads the populated tracks, computes each
+track's average leftover motion, and applies the two-rule filter
+from step 4.
+
+\begin{lstlisting}[caption={Core of \texttt{classifyDynamicTracks}.}]
+// Build (idx, avg_displacement) pairs for tracks with >= 3 observations.
+struct Item { int idx; double score; int obs; };
+std::vector<Item> items;
+for (size_t i = 0; i < tracks.size(); ++i) {
+    if (tracks[i].inlier_count < 3) continue;
+    double avg = double(tracks[i].residual) / tracks[i].inlier_count;
+    items.push_back({(int)i, avg, tracks[i].inlier_count});
+}
+
+// Median of scores = background motion scale.
+auto scores = /* extract .score from items */;
+std::nth_element(scores.begin(), scores.begin()+scores.size()/2, scores.end());
+double median = scores[scores.size()/2];
+
+// Sort by score descending.
+std::sort(items.begin(), items.end(),
+          [](auto& a, auto& b){ return a.score > b.score; });
+
+// Keep top 15% that also clear the absolute floor.
+double floor_disp = std::max(6.0, 3.0 * median);
+int    target     = std::max(6, (int)(items.size() * 0.15));
+
+std::vector<int> dynamic_idx;
+for (int k = 0; k < target && items[k].score >= floor_disp; ++k)
+    dynamic_idx.push_back(items[k].idx);
+
+// Tag them so the bbox stage can weight them.
+for (int i : dynamic_idx) tracks[i].outlier_count = 1;
+return dynamic_idx;
+\end{lstlisting}
+
+\subsection{\texttt{bbox\_estimator.cpp} (Riccardo)}
+
+This is step 5. The code is longer than the others because it has
+three sub-steps, but each one is independent and easy to read.
+
+\begin{lstlisting}[caption={Sketch of \texttt{estimateBBox}. Real code has more guard clauses.}]
+float diag = std::hypot(img_size.width, img_size.height);
+float eps  = std::max(20.f, diag * 0.08f);
+auto labels = proximityCluster(pts, eps, /*minPts=*/3);
+
+// Pick the heaviest cluster (summed "dynamic" flags).
+int best = argmax_cluster_by_weight(labels, weights);
+
+// Merge neighbours: any cluster whose bbox touches the seed's
+// bbox expanded by 0.6*eps gets absorbed.
+cv::Rect seed = boundingRect(cluster_pts[best]);
+for (auto& kv : cluster_pts) if (kv.first != best) {
+    cv::Rect expanded = expand(seed, 0.6f * eps);
+    if ((boundingRect(kv.second) & expanded).area() > 0)
+        cluster.insert(cluster.end(), kv.second.begin(), kv.second.end());
+}
+
+// MAD outlier rejection: drop points more than 3*MAD from the
+// cluster median on either axis.
+auto [mx,my]       = median_xy(cluster);
+auto [madx,mady]   = mad_xy(cluster, mx, my);
+cluster = filter(cluster, mx, my, 3*madx, 3*mady);
+
+// Pad by 1/6 of each dimension and clamp.
+cv::Rect box = boundingRect(cluster);
+int px = std::max(6, box.width/6), py = std::max(6, box.height/6);
+box.x -= px; box.y -= py; box.width += 2*px; box.height += 2*py;
+return box & cv::Rect(0, 0, img_size.width, img_size.height);
+\end{lstlisting}
+
+\subsection{The two small files}
+
+\texttt{evaluator.cpp} (Filippo) is 40 lines. It reads the four
+integers out of \texttt{0000.txt}, computes IoU the usual way
+($|A \cap B|/|A \cup B|$), and writes the prediction file.
+
+\texttt{main.cpp} (Mahdi) is the CLI. It loops over the five
+categories, calls \texttt{trackFeatures}, \texttt{classifyDynamicTracks},
+and \texttt{estimateBBox} in that order, draws overlays with
+OpenCV, prints IoU per category, and writes \texttt{results.csv}
+and \texttt{summary.txt}.
+
+\section{Numbers}
+
+\begin{table}[H]\centering\small
+\begin{tabular}{lcccc}
+\toprule
+category & GT box (w$\times$h) & predicted (w$\times$h) & IoU & TP@0.5 \\
+\midrule
+bird     & $283\times255$ & $329\times249$ & 0.545 & yes \\
+car      & $68\times42$   & $77\times 42$  & 0.783 & yes \\
+frog     & $133\times 98$ & $157\times 94$ & 0.754 & yes \\
+sheep    & $321\times179$ & $296\times126$ & 0.355 & no  \\
+squirrel & $23\times31$   & $76\times 52$  & 0.160 & no  \\
+\midrule
+\multicolumn{3}{r}{\textbf{mIoU}}         & \textbf{0.519} & \\
+\multicolumn{3}{r}{\textbf{accuracy@0.5}} & \textbf{0.60 (3/5)} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]\centering
+\includegraphics[width=.70\linewidth]{figures/iou_bars.pdf}
+\caption{IoU per category. Red dashed line is the true-positive
+threshold.}
+\end{figure}
+
+\paragraph{Visuals.} Green = ground truth, red = our prediction,
+orange dots = all SIFT keypoints on frame 0, green lines =
+trajectories of the points we classified as dynamic.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/bird_overlay.png}\caption*{bird}\end{subfigure}
+\begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/car_overlay.png}\caption*{car}\end{subfigure}
+\begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/frog_overlay.png}\caption*{frog}\end{subfigure}\\[2pt]
+\begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/sheep_overlay.png}\caption*{sheep}\end{subfigure}
+\begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/squirrel_overlay.png}\caption*{squirrel}\end{subfigure}
+\caption{Predictions on every sequence.}
+\end{figure}
+
+\begin{figure}[H]\centering
+\includegraphics[width=.9\linewidth]{figures/frog_triptych.png}
+\caption{The frog over time (first, middle, last frame). Camera is
+a rock; only the frog moves; the method is basically on easy mode
+here.}
+\end{figure}
+
+\section{Where it breaks and why}
+
+\paragraph{Squirrel (IoU 0.16).} The squirrel is tiny
+($23\times31$\,px in a $259\times327$ image --- less than 1\% of the
+picture). SIFT hardly finds any stable extrema on its fur. We end
+up with only about 13 ``dynamic'' points, and a few of those are
+actually wrong matches on nearby leaves, which drag the box outward
+to $76\times52$. Our predicted box is in roughly the right place,
+it's just the wrong size.
+
+\paragraph{Sheep (IoU 0.36).} Three sheep standing behind a wire
+fence. The fence posts look almost identical to each other; the
+wool has lots of repeating texture. That means Lowe's ratio test
+(correctly) rejects a lot of matches as ambiguous, and we end up
+with too few surviving points to cover the full sheep group. The
+box we draw covers one sheep well but misses the others.
+
+\paragraph{What we could do (still no deep learning).}
+\begin{itemize}\itemsep2pt
+\item Run SIFT at a larger resolution so we find more keypoints on
+  small fuzzy things.
+\item Use the SIFT scale $\sigma$ to grow the bounding box
+  proportionally to each keypoint's detection scale.
+\item Grow the predicted box using edge and colour cues --- Canny +
+  morphological closing, SLIC superpixels, or GrabCut seeded by our
+  current box.
+\end{itemize}
+
+\section{How to run it}
+
+\begin{lstlisting}[language=bash, caption={Build, run, regenerate figures, build PDFs.}]
+# one-time
+cmake -S . -B build && cmake --build build -j
+
+# run pipeline
+./build/detect dataset output
+
+# figures
+python3 scripts/make_figures.py
+
+# PDFs
+tectonic report/report.tex
+tectonic report/explainer.tex
+\end{lstlisting}
+
+\section{Who did what}
+
+\begin{itemize}\itemsep2pt
+\item \textbf{Mahdi Gheysari} --- feature detection and matching
+  (\texttt{feature\_tracker.cpp}); the CLI, the visualisation
+  overlays, and the per-category orchestration (\texttt{main.cpp});
+  dataset motion analysis.
+\item \textbf{Filippo Businaro} --- the dynamic-vs-static classifier
+  (\texttt{motion\_segmenter.cpp}); GT parsing and IoU evaluation
+  (\texttt{evaluator.cpp}); the Lowe-ratio and percentile
+  sensitivity sweeps.
+\item \textbf{Riccardo Pesce} --- clustering, MAD outlier rejection
+  and the final bounding box (\texttt{bbox\_estimator.cpp}); the
+  shared API header (\texttt{include/dod.hpp}); CMake build.
+\end{itemize}
+
+Algorithm design, parameter tuning, failure analysis, and report
+writing were shared across the three of us.
+
+\end{document}

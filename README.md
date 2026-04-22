@@ -73,7 +73,27 @@ CMakeLists.txt
 - CMake 3.10+
 - C++17 compiler
 
+## Authors and file ownership
+
+| File | Owner |
+|------|-------|
+| `include/dod.hpp` | Riccardo Pesce |
+| `src/feature_tracker.cpp` | Mahdi Gheysari |
+| `src/motion_segmenter.cpp` | Filippo Businaro |
+| `src/bbox_estimator.cpp` | Riccardo Pesce |
+| `src/evaluator.cpp` | Filippo Businaro |
+| `src/main.cpp` | Mahdi Gheysari |
+
+Design, tuning, and report writing were shared across the team.
+
+## Reports
+
+- [report/report.pdf](report/report.pdf) — 2-page required report.
+- [report/explainer.pdf](report/explainer.pdf) — detailed method and
+  code walk-through with diagrams.
+
 ## License / attribution
 
-All source code written by the author (Mahdi Gheysari). Dataset is
-derived from the publicly available DAVIS and SegTrack2 datasets.
+All source code written by the authors (Mahdi Gheysari, Filippo Businaro,
+Riccardo Pesce). Dataset is derived from the publicly available DAVIS and
+SegTrack2 datasets.
