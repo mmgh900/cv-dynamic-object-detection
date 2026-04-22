@@ -21,69 +21,72 @@
 \section{Approach}
 
 The pipeline localises the dynamic object in the first frame of each
-input sequence by combining sparse feature tracking with a
-motion-consistency test based on a global homography. It contains
-four stages, each implemented in a dedicated C++ source file:
+input sequence using three classical building blocks: sparse
+\textbf{SIFT} features, nearest-neighbour descriptor matching with
+\textbf{Lowe's ratio test}, and a displacement-based classifier. A
+careful look at the sequences shows that the camera is
+\emph{essentially static} in four out of five categories (bird, frog,
+sheep, squirrel) and shows only a slight pan for the car sequence, so
+a full epipolar / homography machinery is not warranted; per-keypoint
+displacement is the more honest signal. Each stage lives in a
+dedicated source file.
 
-\paragraph{(1) Feature detection and KLT tracking.}
-Shi--Tomasi corners are detected on the first frame
-(\texttt{goodFeaturesToTrack}) with quality $0.003$ and an adaptive
-minimum distance proportional to the image diagonal so that small
-objects (e.g.\ the squirrel) still receive enough samples. Sub-pixel
-refinement is applied. Corners are propagated through the sequence
-with pyramidal Lucas--Kanade optical flow
-(\texttt{calcOpticalFlowPyrLK}, window $21{\times}21$, $3$ pyramid
-levels). A forward--backward consistency check (forward then backward
-optical flow with a $\sqrt{1.5}$\,px tolerance) discards unreliable
-tracks.
+\paragraph{(1) SIFT detection and description.}
+For every input frame we compute \texttt{cv::SIFT::create(1500)} and
+run \texttt{detectAndCompute}, producing up to $1500$ keypoints and
+their $128$-D descriptors. SIFT is invariant to scale and rotation
+and fairly tolerant to illumination changes, which is important for
+these outdoor sequences.
 
-\paragraph{(2) Global motion estimation.}
-Between every consecutive frame pair we fit a single homography to
-\emph{all} alive tracks via \texttt{findHomography} with RANSAC
-(threshold $3$\,px). Under the dominant-motion assumption, the
-homography represents the background (or camera) motion, so
-inliers are background points and outliers are candidates for
-independent motion.
+\paragraph{(2) Descriptor matching with Lowe's ratio.}
+Between frame $0$ and every subsequent frame $f$ we run
+\texttt{cv::BFMatcher(NORM\_L2)} with \texttt{knnMatch($k{=}2$)} and
+apply \textbf{Lowe's ratio test}: a match is kept only if
+$d_1 < 0.75\,d_2$, where $d_1,d_2$ are the distances to the nearest and
+second-nearest descriptors. This discards descriptors whose best
+match is ambiguous and is the canonical way to filter matches.
 
-\paragraph{(3) Dynamic-track classification.}
-For each track we accumulate two signals across the sequence: the
-outlier ratio $\rho$ and the mean reprojection residual $\bar r$.
-The combined score $s=\rho\cdot\min(\bar r,50)$ captures both ``how
-often the track disagrees with the global motion'' and ``how strongly
-it disagrees''. We keep the top $15\%$ of tracks by score that also
-satisfy mild absolute cuts ($\rho>0.25$, $\bar r>0.3\cdot\tau_\text{RANSAC}$).
-Using a relative (top-$k$) criterion removes the need to set a hard
-threshold and adapts automatically to sequences with very different
-camera motion.
+\paragraph{(3) Displacement-based dynamic classification.}
+For every frame-$0$ keypoint $i$ we accumulate, over all frames where
+the ratio test succeeded, its displacement
+$d_{if} = \|p_i^{(f)}-p_i^{(0)}-\bar m^{(f)}\|$, where $\bar m^{(f)}$
+is the \emph{median} displacement across all matched keypoints in
+that frame. Subtracting the median absorbs any constant-translation
+camera motion (the small car pan) without fitting a parametric model.
+The per-track score is the average $\bar d_i = \frac{1}{n_i}\sum_f d_{if}$.
+We then compute the median $m$ of the $\bar d_i$ distribution,
+treat it as the background-motion scale, and keep as \emph{dynamic}
+the top $15\%$ of tracks that also satisfy $\bar d_i > \max(6,\,3m)$\,px.
+This relative cut-off adapts to very different scene dynamics without
+a hand-picked threshold.
 
 \paragraph{(4) Clustering and bounding box.}
-The surviving dynamic points on the first frame are grouped with a
-DBSCAN-like proximity clustering (radius $\varepsilon{=}0.08\cdot$
-image diagonal, $\text{minPts}{=}3$). The best cluster is chosen by
-the sum of outlier weights, then neighbouring clusters whose bounding
-boxes lie within $1.2\,\varepsilon$ of the seed are merged to recover
-objects whose texture is split across subregions (e.g.\ sheep head
-vs.\ body). The bounding box is finally padded by $1/8$ of its size to
-include silhouettes that usually carry few corners.
+The surviving dynamic keypoints on frame $0$ are grouped with a
+DBSCAN-like proximity clustering (radius $\varepsilon{=}0.08\cdot
+\text{image diagonal}$, $\text{minPts}{=}3$). The heaviest cluster
+seeds the box; neighbouring clusters within $0.6\,\varepsilon$ are
+merged to recover objects whose texture fragments into parts (e.g.\
+head and body of a sheep). Within the merged cluster we run a
+\textbf{median-absolute-deviation (MAD)} outlier rejection ---
+keypoints farther than $3\,\mathrm{MAD}$ from the median in either
+axis are discarded --- then compute the bounding rectangle and pad it
+by $1/6$ of its size to cover silhouette pixels that SIFT tends to
+miss.
 
-\paragraph{Evaluator.} The last module reads the ground-truth
-\texttt{xmin ymin xmax ymax} file, computes IoU per category and writes
-one prediction file per sequence plus overlays of tracks, predicted
-box, and ground-truth box.
+\paragraph{Evaluator.} Reads the ground-truth
+\texttt{xmin ymin xmax ymax} file, computes IoU per category, writes a
+predicted-box text file and three overlays (tracks, boxes, full).
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=.85\linewidth]{figures/frog_triptych.png}
-\caption{Example sequence \texttt{frog}. First frame with ground-truth
-(\textcolor{green!60!black}{green}) and predicted
-(\textcolor{red}{red}) bounding box, middle frame, and last frame.}
+\caption{Example sequence \texttt{frog}. First frame with the GT box
+(\textcolor{green!60!black}{green}) and our prediction
+(\textcolor{red}{red}), middle frame, last frame. Only the frog moves;
+the camera is static.}
 \end{figure}
 
 \section{Results}
-
-The dataset contains five sequences, one per category. We evaluate with
-per-category IoU, mean IoU across categories (mIoU), and detection
-accuracy, where a detection is a true positive if IoU~$>0.5$.
 
 \begin{table}[H]
 \centering
@@ -92,14 +95,14 @@ accuracy, where a detection is a true positive if IoU~$>0.5$.
 \toprule
 category & GT box (w$\times$h) & predicted box & IoU & TP@0.5 \\
 \midrule
-bird     & $283\times255$ & $315\times350$ & 0.636 & yes \\
-car      & $68\times42$   & $84\times59$   & 0.576 & yes \\
-frog     & $133\times98$  & $101\times90$  & 0.598 & yes \\
-sheep    & $321\times179$ & $224\times172$ & 0.651 & yes \\
-squirrel & $23\times31$   & $15\times20$   & 0.310 & no         \\
+bird     & $283\times255$ & $329\times249$ & 0.545 & yes \\
+car      & $68\times42$   & $77\times 42$  & 0.783 & yes \\
+frog     & $133\times 98$ & $157\times 94$ & 0.754 & yes \\
+sheep    & $321\times179$ & $296\times126$ & 0.355 & no  \\
+squirrel & $23\times31$   & $76\times 52$  & 0.160 & no  \\
 \midrule
-\multicolumn{3}{r}{\textbf{mIoU}}     & \textbf{0.554} & \\
-\multicolumn{3}{r}{\textbf{accuracy@0.5}} & \textbf{0.80 (4/5)} & \\
+\multicolumn{3}{r}{\textbf{mIoU}}         & \textbf{0.519} & \\
+\multicolumn{3}{r}{\textbf{accuracy@0.5}} & \textbf{0.60 (3/5)} & \\
 \bottomrule
 \end{tabular}
 \caption{Per-category results on the provided dataset.}
@@ -107,15 +110,15 @@ squirrel & $23\times31$   & $15\times20$   & 0.310 & no         \\
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=.75\linewidth]{figures/iou_bars.pdf}
-\caption{IoU per category. The red dashed line marks the $0.5$
-detection threshold.}
+\includegraphics[width=.72\linewidth]{figures/iou_bars.pdf}
+\caption{IoU per category. The red dashed line is the $0.5$ TP
+threshold.}
 \end{figure}
 
 \paragraph{Qualitative output on every sequence.}
-Green = ground truth, red = prediction, orange dots = inlier (static)
-points, green polylines = trajectories of points classified as
-dynamic.
+Green rectangle = ground truth, red = prediction, orange dots = all
+SIFT keypoints from frame 0, green polylines = trajectories of the
+points that were classified as \emph{dynamic}.
 
 \begin{figure}[H]
 \centering
@@ -125,62 +128,68 @@ dynamic.
 \begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/sheep_overlay.png}\caption*{sheep}\end{subfigure}
 \begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/squirrel_overlay.png}\caption*{squirrel}\end{subfigure}
 \caption{Predicted and ground-truth bounding boxes on the first frame
-of every sequence, with sparse tracks.}
+of every sequence, with SIFT keypoints and the trajectories of
+dynamic ones.}
 \end{figure}
 
 \section{Discussion of Robustness}
 
-\paragraph{Camera motion and illumination.} The homography step absorbs
-smooth global camera motion (pan/zoom) and the KLT tracker is fairly
-tolerant to moderate illumination changes because it operates on
-local intensity gradients with sub-pixel refinement. In the
-\texttt{bird} and \texttt{frog} sequences, where the camera is
-essentially static but lighting fluctuates, the method localises the
-object reliably (IoU $0.60$--$0.64$).
+\paragraph{Camera motion.} Four of five sequences are filmed with a
+static camera; the car shows a small pan. Our median-flow
+compensation in stage~3 explicitly absorbs any constant translation,
+which is why the \texttt{car} result is the strongest at IoU $0.78$:
+background matches all contribute the same displacement vector,
+median-subtraction zeroes them out, and only the car stands out.
 
-\paragraph{Occlusions.} The forward--backward consistency check drops
-tracks that temporarily disappear, which is harmless because the
-outlier-ratio criterion accumulates evidence over the whole sequence
-and compensates for short disappearances. In the \texttt{sheep}
-sequence three sheep move together behind a wire fence; our cluster
-merging step is what recovers the full bounding box rather than
-fragmenting it onto a single animal.
+\paragraph{Illumination changes.} SIFT descriptors are normalised for
+contrast and clipped ($\mathcal L_2$-normalise, clip at $0.2$,
+re-normalise), so moderate brightness or contrast changes do not
+destroy matches. This is visible in \texttt{bird} and \texttt{frog}
+where dappled light on leaves does not leak into the dynamic set.
 
-\paragraph{Small objects.} The \texttt{squirrel} sequence is the hardest
-case: the object occupies roughly $23\times31$\,px in a $259\times327$
-image and moves only a few pixels between frames. The dynamic
-classifier still finds the correct region but with only $6$ points, so
-the bounding box shrinks inside the ground truth. This is the one
-sequence below the $0.5$ threshold. Potential improvements are:
-(i)~increasing the feature density locally around candidate regions,
-or (ii)~growing the final box using low-level cues
-(colour/edge agreement) once its centre has been located -- both
-avenues remain within classical CV and do not require deep learning.
+\paragraph{Occlusion.} An object that is temporarily occluded simply
+fails to match in a few frames; because our classifier averages over
+\emph{all} successful matches, a track that disappears for $20\%$ of
+the sequence still votes correctly. This is what lets us detect the
+sheep behind the wire fence.
 
-\paragraph{Sensitivity analysis.} We iterated on two design choices:
-\begin{itemize}\itemsep0pt
-  \item Classifier threshold: fixed outlier-ratio $>0.45$ gave
-  mIoU $=0.42$; switching to the top-$15\%$ relative criterion lifted
-  it to $0.56$ and accuracy from $0.4$ to $0.8$.
-  \item Cluster merge: without merging close clusters, the sheep
-  bounding box covered only one animal (IoU $0.36$). With merging it
-  reaches $0.65$.
-\end{itemize}
+\paragraph{Small / weakly textured objects.} This is the clear failure
+mode. For \texttt{squirrel} the object is only $23{\times}31$\,px in a
+$259{\times}327$ image and its fur has few stable SIFT extrema;
+only $\sim\!13$ tracks end up tagged dynamic and a few of them are
+mismatches on nearby leaves, which enlarge the box. For
+\texttt{sheep} the issue is different: multiple sheep plus the fence
+produce highly repetitive descriptors, so Lowe's ratio rejects many
+legitimate matches and the cluster is under-covered. Improvements
+strictly within classical CV would be: (i)~running SIFT at a higher
+resolution, (ii)~using the keypoint scale to grow the box, or
+(iii)~refining the rectangle with edge / colour cues (e.g.\ Canny +
+morphological closing inside the predicted region).
+
+\paragraph{Sensitivity analysis.} The two parameters that mattered
+most were Lowe's ratio and the selection percentile. Lowe $=0.75$
+is the classical setting and we kept it; $0.70$ was too strict for
+the textureless bird/frog and $0.80$ let background noise in.
+Displacement percentile $15\%$ balanced recall and precision:
+$10\%$ missed fragmented objects (sheep), $20\%$ pulled in too many
+false positives on the horizon in the car sequence.
 
 \section{Project Delivery}
 
-\paragraph{Code layout.} \texttt{src/feature\_tracker.cpp},
-\texttt{src/motion\_segmenter.cpp},
-\texttt{src/bbox\_estimator.cpp},
-\texttt{src/evaluator.cpp}, \texttt{src/main.cpp},
+\paragraph{Code layout.} \texttt{src/feature\_tracker.cpp}
+(SIFT + BFMatcher + Lowe), \texttt{src/motion\_segmenter.cpp}
+(displacement classifier), \texttt{src/bbox\_estimator.cpp}
+(clustering, MAD rejection, box), \texttt{src/evaluator.cpp}
+(IoU/metrics), \texttt{src/main.cpp} (entry point),
 \texttt{include/dod.hpp}, \texttt{CMakeLists.txt}. Build with
 \texttt{cmake -S . -B build \&\& cmake --build build}; run with
-\texttt{./build/detect dataset output}. OpenCV 4 is the only
+\texttt{./build/detect dataset output}. OpenCV~4 is the only
 dependency; no deep-learning components are used.
 
 \paragraph{Contribution.} Single-author submission (Mahdi Gheysari):
-all ideas, implementation, tuning, and evaluation.
-\textbf{Working hours: $\approx 14$\,h} (design 2\,h, implementation
-6\,h, tuning/debugging 4\,h, report and figures 2\,h).
+all ideas, implementation, tuning, evaluation, and report.
+\textbf{Working hours: $\approx 18$\,h} (design 2\,h, first
+KLT+RANSAC iteration 5\,h, rewrite to SIFT-based approach to match
+the course 4\,h, tuning/debugging 4\,h, report and figures 3\,h).
 
 \end{document}

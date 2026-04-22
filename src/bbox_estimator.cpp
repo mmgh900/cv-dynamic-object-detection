@@ -104,7 +104,7 @@ cv::Rect estimateBBox(const std::vector<TrackedPoint>& tracks,
 
     std::vector<cv::Point2f> cluster = cluster_pts[best];
     cv::Rect seed = cbox[best];
-    float merge_gap = eps * 1.2f;
+    float merge_gap = eps * 0.6f;
     for (auto& kv : cluster_pts) {
         if (kv.first == best) continue;
         cv::Rect r = cbox[kv.first];
@@ -115,12 +115,41 @@ cv::Rect estimateBBox(const std::vector<TrackedPoint>& tracks,
             cluster.insert(cluster.end(), kv.second.begin(), kv.second.end());
         }
     }
+
+    // Reject outliers within the cluster using median absolute
+    // deviation. Classical CV technique for robust spread estimation.
+    if (cluster.size() >= 6) {
+        std::vector<float> xs, ys;
+        xs.reserve(cluster.size()); ys.reserve(cluster.size());
+        for (const auto& p : cluster) { xs.push_back(p.x); ys.push_back(p.y); }
+        std::nth_element(xs.begin(), xs.begin()+xs.size()/2, xs.end());
+        std::nth_element(ys.begin(), ys.begin()+ys.size()/2, ys.end());
+        float mx = xs[xs.size()/2], my = ys[ys.size()/2];
+        std::vector<float> dx, dy;
+        dx.reserve(cluster.size()); dy.reserve(cluster.size());
+        for (const auto& p : cluster) {
+            dx.push_back(std::fabs(p.x - mx));
+            dy.push_back(std::fabs(p.y - my));
+        }
+        std::nth_element(dx.begin(), dx.begin()+dx.size()/2, dx.end());
+        std::nth_element(dy.begin(), dy.begin()+dy.size()/2, dy.end());
+        float madx = std::max(6.f, dx[dx.size()/2]);
+        float mady = std::max(6.f, dy[dy.size()/2]);
+        std::vector<cv::Point2f> kept;
+        for (const auto& p : cluster) {
+            if (std::fabs(p.x - mx) <= 3.0f * madx &&
+                std::fabs(p.y - my) <= 3.0f * mady) {
+                kept.push_back(p);
+            }
+        }
+        if (kept.size() >= 4) cluster = kept;
+    }
     cv::Rect box = cv::boundingRect(cluster);
 
     // Pad box slightly to cover full object footprint (points are
     // typically detected on texture inside, not at silhouette).
-    int pad_x = std::max(6, box.width / 8);
-    int pad_y = std::max(6, box.height / 8);
+    int pad_x = std::max(6, box.width / 6);
+    int pad_y = std::max(6, box.height / 6);
     box.x -= pad_x; box.y -= pad_y;
     box.width += 2 * pad_x; box.height += 2 * pad_y;
     box &= cv::Rect(0, 0, img_size.width, img_size.height);

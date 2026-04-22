@@ -7,216 +7,202 @@ exists, and what to look at when reading the code.
 
 ## 1. The problem
 
-You get a short video of a scene (as a folder of numbered PNG/JPG
-frames). Somewhere in that video, **one thing is moving** (a bird, a
-car, a frog, a sheep, or a squirrel). Your job is to look at the
-**first frame** and draw a box around that moving thing.
+You get a short video of a scene (a folder of numbered PNG/JPG frames).
+Somewhere in that video, **one thing is moving** (a bird, a car, a
+frog, a sheep, or a squirrel). Your job is to look at the **first
+frame** and draw a box around that moving thing.
 
-That's the whole task. Simple to describe, surprisingly annoying to
-actually do, because:
+Constraints:
 
-- the camera might be moving too (shaking, panning),
-- lighting changes across the sequence,
-- the object might be small (the squirrel is ~23×31 pixels),
-- parts of the object can be occluded,
-- and we can't use deep learning — only classical computer vision.
+- classical computer vision only — no deep learning,
+- lighting can change across the sequence,
+- objects can be small (the squirrel is ~23×31 pixels),
+- parts of the object can be temporarily occluded.
 
 Input: a folder of frames.
-Output: `xmin ymin xmax ymax` for frame 0, plus a picture of the
-first frame with the box drawn on it.
+Output: `xmin ymin xmax ymax` for frame 0, plus a picture of the first
+frame with the box drawn on it.
 
-## 2. The core idea in one sentence
+## 2. What we actually see in the data
 
-> **If we track image features across the sequence, almost everything
-> will move in a way that's consistent with a single camera motion —
-> except the features that sit on the moving object. Those are our
-> clues.**
+Before picking a method we looked at each sequence:
 
-So the algorithm is basically:
+- **bird, frog, sheep, squirrel** — camera is essentially static.
+- **car** — camera does a small left-to-right pan, but the scene
+  barely translates.
 
-1. Put dots on "interesting" pixels in frame 0.
-2. Follow each dot through the video.
-3. For each pair of frames, ask "can one global transformation explain
-   how most dots moved?" — the transformation that explains the
-   **majority** is the camera/background motion.
-4. The dots that **don't** fit that transformation are suspicious.
-   Those are our moving-object dots.
-5. Group the suspicious dots in frame 0 and draw a box around them.
+So the honest model is: *"the background barely moves; the object
+does."* We don't need a full epipolar / homography machinery to
+undo camera motion — we just need to remove any constant background
+drift.
 
-That's it. Everything else is implementation detail.
+## 3. The core idea in one sentence
 
-## 3. The pipeline, stage by stage
+> **Detect the same interesting points in every frame, match them
+> back to frame 0, subtract off the global background flow, and keep
+> the points whose remaining displacement is unusually large. Those
+> points sit on the moving object.**
 
-### Stage 1 — Put dots on the first frame  (`src/feature_tracker.cpp`)
+## 4. The pipeline, stage by stage
 
-We use **Shi–Tomasi corners** (`cv::goodFeaturesToTrack`). Corners are
-good because they're locally unique — a feature tracker can tell them
-apart from the patch next to them. A flat wall is useless; the corner
-of a brick is great.
+### Stage 1 — Find interesting points on every frame  (`src/feature_tracker.cpp`)
 
-Two small tricks:
-- **Sub-pixel refinement** (`cornerSubPix`) — pushes the corner
-  coordinate to a fractional pixel. Helps tracking accuracy later.
-- **Adaptive minimum distance** between corners, proportional to the
-  image diagonal. Small images (like the squirrel sequence, 259×327)
-  get denser sampling so small objects still catch enough corners.
+We use **SIFT** via `cv::SIFT::create(1500)` and its
+`detectAndCompute`. SIFT gives us up to 1500 keypoints per frame plus
+a **128-D descriptor** per keypoint. SIFT is scale-invariant,
+rotation-invariant, and reasonably illumination-invariant thanks to
+descriptor normalisation — exactly what you want for outdoor
+sequences.
 
-Output: a few hundred to ~1500 `Point2f` seeds.
+### Stage 2 — Match frame 0 to every later frame (same file)
 
-### Stage 2 — Follow each dot through the sequence (still `feature_tracker.cpp`)
+Between frame 0 and every frame `f > 0` we run a **brute-force L2
+matcher** with `knnMatch(k=2)` — for each descriptor in frame 0, it
+finds the **two** closest descriptors in frame `f`. We then apply
+**Lowe's ratio test**: keep a match only if
 
-This is the **Kanade–Lucas–Tomasi (KLT) tracker**, via
-`cv::calcOpticalFlowPyrLK`. For each dot in frame `t`, it guesses
-where it went in frame `t+1` by assuming the dot's local brightness
-pattern barely changed (the "brightness-constancy" assumption) and
-that motion was small. The "pyramidal" part means it does this at
-several scales so it can handle bigger motions.
-
-To kill bad tracks early, we do a **forward–backward consistency
-check**: track forward from `t` → `t+1`, then backward from `t+1` →
-`t`, and check you end up where you started (within ~1 pixel). If
-not, drop the dot. This catches dots that drift onto the wrong thing,
-get occluded, or hit a boundary.
-
-Output: for each dot, a list of `(x, y)` positions across frames — a
-**trajectory**.
-
-### Stage 3 — Separate "moves with the world" from "moves on its own" (`src/motion_segmenter.cpp`)
-
-This is the heart of the method.
-
-Between every pair of consecutive frames, we ask:
-> "Is there a single **homography** (a 3×3 projective transformation)
-> that explains how most dots moved?"
-
-We fit that homography using **RANSAC** (`cv::findHomography` with
-`cv::RANSAC`). RANSAC repeatedly picks random small subsets of dots,
-fits a homography to them, and counts how many other dots agree with
-it ("inliers"). The best homography is the one with the most inliers.
-
-Why a homography? Because if the scene is roughly planar, or the
-camera is mostly rotating, a homography is a really good model for
-**pure background motion**. Whatever doesn't fit the homography is
-almost certainly moving independently.
-
-For each dot we then accumulate two numbers over the whole sequence:
-- `out_ratio` — fraction of frame-pairs where it was a RANSAC
-  outlier (didn't fit the homography).
-- `avg_res` — average distance between where the homography predicted
-  it would be and where it actually ended up.
-
-We combine those into one score:
 ```
-score = out_ratio * min(avg_res, 50)
+best_distance < 0.75 * second_best_distance
 ```
-This says: "the more often you disagree with the global motion AND
-the bigger your disagreement, the more suspicious you are."
 
-We keep the **top 15%** of dots by this score, instead of using a
-fixed threshold. Why the top 15%? Because scenes vary — sometimes the
-camera is static and the object stands out hugely, sometimes the
-camera pans and residuals are all bigger. A relative cut-off is more
-robust than a magic number.
+The idea is simple: if the best and second-best matches are almost
+equally good, the best match is probably ambiguous, so throw it out.
+This is the canonical way to filter descriptor matches and is what
+the course PDF recommends.
 
-Output: indices of the dots classified as **dynamic**.
+For every surviving match we record the displacement
+`p_f - p_0` and accumulate, per frame-0 keypoint, a running total of
+its motion.
 
-### Stage 4 — Turn dynamic dots into a bounding box (`src/bbox_estimator.cpp`)
+### Stage 3 — Remove the global background drift (still `feature_tracker.cpp`)
 
-Now we have a cloud of "suspicious" dots scattered on the first frame.
-We need to return a single rectangle. Three problems:
+Because the car sequence has a slight camera pan, all background
+points drift in the same direction. We don't want to flag those as
+dynamic. The fix is cheap: per frame, take the **median displacement
+vector** across all matched points and subtract it from each point's
+displacement before storing.
 
-- **Outliers.** A few dynamic dots might be noise, far from the real
-  object.
-- **Fragmentation.** On a large object (the sheep sequence has three
-  sheep together), the dots cluster in several blobs even though it's
-  one thing we want to box.
-- **Undercoverage.** Corners tend to land on the **texture** of the
-  object, not on its silhouette, so a tight box around the dots is
-  usually smaller than the true object.
+Static-camera sequences have near-zero median flow, so the
+subtraction is harmless. Panning sequences have a non-zero median
+that exactly cancels the camera component.
 
-Our fix:
-1. **Cluster the dots** with a DBSCAN-like proximity rule (radius
-   ~8% of the image diagonal). This naturally drops isolated noise
-   dots (they become "noise" with label 0).
-2. **Pick the best cluster** (highest total outlier-weight) and then
-   **merge neighbouring clusters** whose bounding boxes are within
-   ~1.2× radius. This is what recovers the full sheep group instead
-   of only boxing one sheep.
-3. **Pad the final bounding box** by 1/8 of its size to compensate for
-   the "corners land on texture, not silhouette" issue.
+No homography, no RANSAC, no parametric model — just a median.
 
-Output: a single `cv::Rect` in first-frame coordinates.
+### Stage 4 — Decide which points are dynamic  (`src/motion_segmenter.cpp`)
 
-### Stage 5 — Score and write files (`src/evaluator.cpp`, `src/main.cpp`)
+For each frame-0 keypoint `i` we now have:
+
+- `n_i` — how many frames had a successful match,
+- `r_i` — the sum of relative displacement magnitudes across those
+  frames.
+
+Its score is `avg_i = r_i / n_i`, i.e. average per-frame residual
+motion.
+
+We compute the **median** of all scores and use it as the
+"background motion scale". Then:
+
+- **rank** all tracks by score, descending,
+- **keep the top 15%** that also satisfy `score > max(6 px, 3 × median)`.
+
+This relative cut-off adapts to the scene: a fully static camera has
+a tiny median and almost anything above 6 px survives; a slight-pan
+scene has a larger median and the 3× factor filters it out.
+
+### Stage 5 — Turn dynamic points into a bounding box  (`src/bbox_estimator.cpp`)
+
+We now have a cloud of suspicious dots on frame 0. Three problems:
+
+- **outliers** — a few dynamic dots might be noise,
+- **fragmentation** — on large objects the dots cluster in several
+  blobs even though it's one object,
+- **undercoverage** — SIFT lands on texture, not on the silhouette,
+  so a tight box is usually smaller than the true object.
+
+The fix:
+
+1. **Cluster** with a DBSCAN-like proximity rule (radius ≈ 8% of the
+   image diagonal, minPts = 3). Isolated noise dots are labelled as
+   noise and ignored.
+2. **Pick the heaviest cluster**, then **merge neighbouring clusters**
+   whose boxes are within ~0.6× radius of it. This recovers objects
+   whose texture fragments into parts (e.g.\ head vs body of a sheep).
+3. **MAD outlier rejection** inside the merged cluster — drop any
+   point more than `3 × median-absolute-deviation` from the cluster
+   median in either axis.
+4. **Pad the final box** by 1/6 of its size to cover silhouette
+   pixels that SIFT tends to miss.
+
+### Stage 6 — Score and write files  (`src/evaluator.cpp`, `src/main.cpp`)
 
 For each category we:
+
 - read the ground-truth `0000.txt` (four integers),
 - compute **IoU** between predicted and GT boxes,
-- mark it a **true positive** if IoU > 0.5,
-- write the prediction to `output/<cat>_pred.txt`,
-- save an overlay PNG with tracks + GT (green) + prediction (red).
+- mark a **true positive** if IoU > 0.5,
+- write prediction to `output/<cat>_pred.txt`,
+- save overlay PNGs (tracks, boxes, full).
 
-At the end, `main.cpp` prints **mean IoU** and **accuracy** across all
-five categories.
+At the end `main.cpp` prints **mIoU** and **accuracy@0.5**.
 
-## 4. Why these particular choices?
+## 5. Why these particular choices?
 
-- **Why Shi–Tomasi + KLT instead of SIFT + matching?**
-  KLT is way faster and gives continuous trajectories, which we need
-  for the "how often does this dot disagree" signal. SIFT would give
-  matches between distant frames but not a smooth trajectory, so we'd
-  lose the temporal aggregation that makes the method robust.
-- **Why homography and not fundamental matrix?**
-  Fundamental matrix handles general 3D scenes with a moving camera
-  but needs many more inliers and is noisier on short baselines.
-  Homography is strictly a planar/rotational model but in practice
-  works very well as a **dominant motion** approximation for these
-  short clips.
-- **Why a relative top-k and not a fixed threshold on residuals?**
-  Tried fixed ("out_ratio > 0.45"): mIoU 0.42. Tried relative
-  (top-15%): mIoU 0.56. Scenes are too different for one number.
+- **Why SIFT + Lowe ratio and not KLT?**
+  The PDF explicitly recommends "sparse local features + robust
+  feature matching", and the course covers feature matching rather
+  than Lucas-Kanade flow. SIFT + Lowe is the canonical classroom
+  recipe and handles scale / illumination changes naturally.
+- **Why median subtraction and not RANSAC homography?**
+  Four of five sequences have a static camera and the fifth has only
+  a slight translation. A full homography is overkill and its
+  reprojection residuals are noisier than the displacement itself.
+  The median vector cancels a constant translation exactly.
+- **Why top-15% and a relative floor instead of a fixed threshold?**
+  Fixed thresholds fail across scenes: static-camera bird/frog have
+  tiny displacements everywhere, panning car has larger ones. A
+  percentile plus `3 × median` floor self-adapts.
 - **Why cluster-merging?**
-  Without it, sheep IoU was 0.36 (only one sheep boxed). With it, 0.65.
+  Without it the sheep box collapses to a single sheep.
 
-## 5. Results we actually got
+## 6. Results we actually got
 
 | category | GT box (w×h) | predicted (w×h) | IoU | TP@0.5 |
 |----------|--------------|------------------|-----|--------|
-| bird     | 283×255      | 315×350          | 0.64 | yes |
-| car      | 68×42        | 84×59            | 0.58 | yes |
-| frog     | 133×98       | 101×90           | 0.60 | yes |
-| sheep    | 321×179      | 224×172          | 0.65 | yes |
-| squirrel | 23×31        | 15×20            | 0.31 | **no** |
+| bird     | 283×255      | 329×249          | 0.545 | yes |
+| car      | 68×42        | 77×42            | 0.783 | yes |
+| frog     | 133×98       | 157×94           | 0.754 | yes |
+| sheep    | 321×179      | 296×126          | 0.355 | no  |
+| squirrel | 23×31        | 76×52            | 0.160 | no  |
 
-- **mIoU = 0.554**
-- **accuracy = 0.80 (4/5)**
+- **mIoU = 0.519**
+- **accuracy@0.5 = 0.60 (3/5)**
 
-Squirrel is the one failure: it's a ~23×31 px object in a portrait
-image with tiny inter-frame motion. Only 6 dots end up classified as
-dynamic, so the resulting box is too small. The centre is roughly
-right, but the area isn't.
+Failure modes:
 
-Possible improvements (all still classical CV):
-- re-sample features densely around candidate dynamic regions,
-- expand the final box using colour / edge agreement (GrabCut,
-  SLIC superpixels, simple edge-density growing).
+- **squirrel** — tiny object (23×31 px) with low-texture fur; SIFT
+  finds few stable extrema on it, a handful of mismatches on nearby
+  leaves enlarge the box.
+- **sheep** — multiple sheep plus a wire fence produce very
+  repetitive descriptors, so Lowe's ratio rejects many legitimate
+  matches and the cluster is under-covered.
 
-## 6. How to read the code
+Both failures are classical hard cases for sparse-descriptor
+methods.
 
-If you're going to read only one file, make it
-**`src/motion_segmenter.cpp`** — that's where the interesting idea
-lives.
+## 7. How to read the code
 
 Suggested order:
-1. `include/dod.hpp` — look at the structs and function signatures,
-   you get the whole data flow in 30 seconds.
-2. `src/main.cpp` — top-level orchestration, one sequence at a time.
-3. `src/feature_tracker.cpp` — detection + KLT.
-4. `src/motion_segmenter.cpp` — the homography / outlier logic.
-5. `src/bbox_estimator.cpp` — clustering and the final rectangle.
-6. `src/evaluator.cpp` — trivial I/O and IoU.
 
-## 7. How to run it
+1. `include/dod.hpp` — structs and signatures.
+2. `src/main.cpp` — orchestration, one sequence at a time.
+3. `src/feature_tracker.cpp` — SIFT + BFMatcher + Lowe + median-flow
+   subtraction. **The most interesting file.**
+4. `src/motion_segmenter.cpp` — percentile-based dynamic
+   classification.
+5. `src/bbox_estimator.cpp` — clustering, MAD, box.
+6. `src/evaluator.cpp` — trivial I/O + IoU.
+
+## 8. How to run it
 
 ```bash
 # one-time
@@ -227,44 +213,21 @@ cmake --build build -j
 ./build/detect dataset output
 ```
 
-Outputs land in `output/` (prediction txt, overlay PNG, tracks PNG,
-results CSV, summary text).
-
-Figures for the report are regenerated from `output/` by:
+Outputs land in `output/` (prediction txt, overlay PNGs, CSV,
+summary text). Figures for the report are regenerated by:
 
 ```bash
 python3 scripts/make_figures.py
 ```
 
-## 8. What's in each folder
-
-```
-mid-project/
-├── CMakeLists.txt          build recipe
-├── include/dod.hpp         shared declarations
-├── src/
-│   ├── feature_tracker.cpp stage 1 + 2
-│   ├── motion_segmenter.cpp stage 3
-│   ├── bbox_estimator.cpp  stage 4
-│   ├── evaluator.cpp       GT / IoU
-│   └── main.cpp            entry point
-├── scripts/make_figures.py  figure generator
-├── dataset/                 (gitignored) input frames + GT
-├── output/                  per-run predictions and visualisations
-└── report/
-    ├── report.tex           2-page LaTeX report
-    ├── report.pdf           compiled version
-    └── figures/             figures used by the report
-```
-
 ## 9. TL;DR
 
-1. Drop corners on frame 0.
-2. Track them with KLT.
-3. For each pair of frames, find the global motion with RANSAC
-   homography.
-4. The dots that consistently don't fit the global motion are on the
-   moving object.
-5. Cluster them, merge nearby clusters, pad a bit, output a box.
+1. Run SIFT on every frame.
+2. Match frame 0 → frame `f` with BFMatcher + Lowe's ratio (0.75).
+3. Subtract the per-frame median displacement (kills camera drift).
+4. Average remaining residual per track; keep the top 15% above
+   `max(6, 3 × median)`.
+5. Cluster the survivors, merge neighbours, MAD-filter, pad, output a
+   box.
 
 That's the whole project.

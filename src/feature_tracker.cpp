@@ -1,8 +1,11 @@
 // Author: Mahdi Gheysari
-// Sparse feature detection and KLT tracking across an image sequence.
+// SIFT feature extraction + nearest-neighbour descriptor matching with
+// Lowe's ratio test. Produces, for every keypoint detected in the first
+// frame, its tracked position in subsequent frames by chaining matches
+// between frame 0 and every later frame.
 
 #include "dod.hpp"
-#include <opencv2/video/tracking.hpp>
+#include <opencv2/features2d.hpp>
 #include <filesystem>
 #include <algorithm>
 
@@ -22,90 +25,94 @@ std::vector<std::string> listFrames(const std::string& folder) {
     return files;
 }
 
+// Kept for interface compatibility; no longer used by trackFeatures,
+// but other callers (e.g. diagnostics) can still detect corners.
 std::vector<cv::Point2f> detectFeatures(const cv::Mat& gray_img, int max_corners) {
-    std::vector<cv::Point2f> corners;
-    // Adaptive min distance: smaller images need denser sampling so
-    // that small moving objects (squirrel, car) get enough features.
-    double diag = std::sqrt((double)(gray_img.cols * gray_img.cols +
-                                     gray_img.rows * gray_img.rows));
-    double min_dist = std::max(3.0, diag / 180.0);
-    cv::goodFeaturesToTrack(gray_img, corners,
-                            max_corners,
-                            0.003,   // quality level (low -> dense)
-                            min_dist,
-                            cv::noArray(),
-                            5,       // block size
-                            false,   // use Harris
-                            0.04);
-    if (!corners.empty()) {
-        cv::TermCriteria crit(cv::TermCriteria::EPS | cv::TermCriteria::COUNT, 20, 0.03);
-        cv::cornerSubPix(gray_img, corners, cv::Size(7, 7), cv::Size(-1, -1), crit);
-    }
-    return corners;
+    auto sift = cv::SIFT::create(max_corners);
+    std::vector<cv::KeyPoint> kps;
+    cv::Mat desc;
+    sift->detectAndCompute(gray_img, cv::noArray(), kps, desc);
+    std::vector<cv::Point2f> out;
+    out.reserve(kps.size());
+    for (const auto& k : kps) out.push_back(k.pt);
+    return out;
 }
 
+// For every SIFT keypoint detected in frame 0, match it against SIFT
+// keypoints in every subsequent frame using BFMatcher L2 knnMatch(k=2)
+// filtered by Lowe's ratio test at 0.75. Each successful match records
+// the matched position along the track.
 void trackFeatures(const std::vector<cv::Mat>& frames_gray,
                    std::vector<TrackedPoint>& tracks) {
+    tracks.clear();
     if (frames_gray.size() < 2) return;
 
-    auto seeds = detectFeatures(frames_gray[0]);
-    tracks.clear();
-    tracks.reserve(seeds.size());
-    for (const auto& p : seeds) {
+    const int n_features = 1500;
+    const float lowe_ratio = 0.75f;
+
+    auto sift = cv::SIFT::create(n_features);
+
+    std::vector<cv::KeyPoint> kp0;
+    cv::Mat desc0;
+    sift->detectAndCompute(frames_gray[0], cv::noArray(), kp0, desc0);
+
+    tracks.reserve(kp0.size());
+    for (const auto& k : kp0) {
         TrackedPoint t;
-        t.first = p;
-        t.last = p;
-        t.trajectory.push_back(p);
+        t.first = k.pt;
+        t.last  = k.pt;
+        t.trajectory.push_back(k.pt);
+        t.inlier_count  = 0;  // repurposed: count of successful matches
+        t.outlier_count = 0;  // repurposed: count of observations above bg scale
+        t.residual      = 0.f; // repurposed: total displacement from frame 0
         tracks.push_back(t);
     }
 
-    const int win = 21;
-    cv::TermCriteria crit(cv::TermCriteria::EPS | cv::TermCriteria::COUNT, 30, 0.01);
-
-    std::vector<cv::Point2f> prev_pts;
-    for (auto& t : tracks) prev_pts.push_back(t.last);
+    cv::BFMatcher matcher(cv::NORM_L2, /*crossCheck=*/false);
 
     for (size_t f = 1; f < frames_gray.size(); ++f) {
-        std::vector<cv::Point2f> next_pts;
-        std::vector<uchar> status;
-        std::vector<float> err;
+        std::vector<cv::KeyPoint> kpF;
+        cv::Mat descF;
+        sift->detectAndCompute(frames_gray[f], cv::noArray(), kpF, descF);
+        if (descF.empty() || desc0.empty()) continue;
 
-        if (prev_pts.empty()) break;
+        std::vector<std::vector<cv::DMatch>> knn;
+        matcher.knnMatch(desc0, descF, knn, 2);
 
-        cv::calcOpticalFlowPyrLK(frames_gray[f - 1], frames_gray[f],
-                                 prev_pts, next_pts, status, err,
-                                 cv::Size(win, win), 3, crit);
-
-        // Backward check for robustness
-        std::vector<cv::Point2f> back_pts;
-        std::vector<uchar> status_b;
-        std::vector<float> err_b;
-        cv::calcOpticalFlowPyrLK(frames_gray[f], frames_gray[f - 1],
-                                 next_pts, back_pts, status_b, err_b,
-                                 cv::Size(win, win), 3, crit);
-
-        size_t k = 0;
-        for (auto& t : tracks) {
-            if (!t.alive) continue;
-            if (k >= status.size()) break;
-            bool ok = status[k] && status_b[k];
-            if (ok) {
-                float dx = back_pts[k].x - prev_pts[k].x;
-                float dy = back_pts[k].y - prev_pts[k].y;
-                if (dx * dx + dy * dy > 1.5f) ok = false;
-            }
-            if (!ok) {
-                t.alive = false;
-            } else {
-                t.last = next_pts[k];
-                t.trajectory.push_back(next_pts[k]);
-            }
-            ++k;
+        // First pass: collect valid matches for this frame so we can
+        // estimate a global translation (median flow) and remove it,
+        // which covers the slight camera pan in the car sequence
+        // without fitting a full homography.
+        struct Mtch { int i; cv::Point2f p_new; cv::Point2f disp; };
+        std::vector<Mtch> ok;
+        ok.reserve(knn.size());
+        for (const auto& pair : knn) {
+            if (pair.size() < 2) continue;
+            if (pair[0].distance >= lowe_ratio * pair[1].distance) continue;
+            int i = pair[0].queryIdx;
+            int j = pair[0].trainIdx;
+            if (i < 0 || i >= (int)tracks.size()) continue;
+            if (j < 0 || j >= (int)kpF.size())    continue;
+            cv::Point2f p_new = kpF[j].pt;
+            ok.push_back({i, p_new, p_new - tracks[i].first});
         }
+        if (ok.empty()) continue;
 
-        // Rebuild prev_pts from alive tracks
-        prev_pts.clear();
-        for (auto& t : tracks) if (t.alive) prev_pts.push_back(t.last);
+        // Median displacement across matched keypoints.
+        std::vector<float> xs, ys;
+        xs.reserve(ok.size()); ys.reserve(ok.size());
+        for (const auto& m : ok) { xs.push_back(m.disp.x); ys.push_back(m.disp.y); }
+        std::nth_element(xs.begin(), xs.begin() + xs.size() / 2, xs.end());
+        std::nth_element(ys.begin(), ys.begin() + ys.size() / 2, ys.end());
+        cv::Point2f med(xs[xs.size() / 2], ys[ys.size() / 2]);
+
+        for (const auto& m : ok) {
+            tracks[m.i].last = m.p_new;
+            tracks[m.i].trajectory.push_back(m.p_new);
+            cv::Point2f rel = m.disp - med;   // motion relative to global flow
+            tracks[m.i].residual += (float)cv::norm(rel);
+            tracks[m.i].inlier_count++;
+        }
     }
 }
 

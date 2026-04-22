@@ -6,26 +6,30 @@ a moving object in the first frame of an RGB image sequence using
 
 ## Pipeline
 
-1. **Sparse features** – Shi–Tomasi corners with adaptive min-distance.
-2. **KLT tracking** – pyramidal Lucas–Kanade optical flow with
-   forward-backward consistency check.
-3. **Global motion** – RANSAC homography per consecutive frame pair.
-4. **Dynamic classification** – top-15% tracks by (outlier ratio × mean
-   reprojection residual).
-5. **Clustering + bbox** – DBSCAN-like proximity clustering with
-   neighbouring-cluster merging, then a padded bounding box.
+1. **SIFT features** – `cv::SIFT::create(1500)` + `detectAndCompute`
+   on every frame (128-D descriptors).
+2. **Descriptor matching** – `cv::BFMatcher(NORM_L2)` with
+   `knnMatch(k=2)` between frame 0 and every later frame, filtered by
+   **Lowe's ratio test** at 0.75.
+3. **Median-flow subtraction** – per frame, the median displacement
+   across matched keypoints is subtracted from each match to cancel
+   any constant camera translation (covers the slight car pan).
+4. **Dynamic classification** – average residual displacement per
+   track; keep the top 15% above `max(6 px, 3 × median)`.
+5. **Clustering + bbox** – DBSCAN-like proximity clustering, neighbour
+   merging, MAD outlier rejection, padded bounding box.
 
 ## Results on the provided dataset
 
 | category | IoU | TP@0.5 |
 |----------|-----|--------|
-| bird     | 0.636 | yes |
-| car      | 0.576 | yes |
-| frog     | 0.598 | yes |
-| sheep    | 0.651 | yes |
-| squirrel | 0.310 | no  |
+| bird     | 0.545 | yes |
+| car      | 0.783 | yes |
+| frog     | 0.754 | yes |
+| sheep    | 0.355 | no  |
+| squirrel | 0.160 | no  |
 
-**mIoU = 0.554, accuracy = 0.80 (4/5).**
+**mIoU = 0.519, accuracy@0.5 = 0.60 (3/5).**
 
 ## Build and run
 
@@ -55,9 +59,9 @@ LaTeX source: [report/report.tex](report/report.tex). Compile with
 ```
 include/dod.hpp
 src/
-  feature_tracker.cpp   -- Shi-Tomasi + KLT
-  motion_segmenter.cpp  -- RANSAC homography, dynamic classification
-  bbox_estimator.cpp    -- clustering + bbox
+  feature_tracker.cpp   -- SIFT + BFMatcher + Lowe ratio + median flow
+  motion_segmenter.cpp  -- displacement-percentile dynamic classifier
+  bbox_estimator.cpp    -- clustering + MAD + bbox
   evaluator.cpp         -- IoU, GT parsing
   main.cpp              -- CLI entry point
 CMakeLists.txt

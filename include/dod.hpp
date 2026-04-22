@@ -21,10 +21,12 @@ void trackFeatures(const std::vector<cv::Mat>& frames_gray,
                    std::vector<TrackedPoint>& tracks);
 
 // motion_segmenter.cpp
-// Returns index list of tracks considered dynamic.
+// Returns index list of tracks considered dynamic. Implementation uses
+// a displacement-percentile criterion; the third argument is kept for
+// API compatibility and is unused.
 std::vector<int> classifyDynamicTracks(const std::vector<cv::Mat>& frames_gray,
                                        std::vector<TrackedPoint>& tracks,
-                                       double ransac_thresh = 3.0);
+                                       double unused = 0.0);
 
 // bbox_estimator.cpp
 cv::Rect estimateBBox(const std::vector<TrackedPoint>& tracks,
