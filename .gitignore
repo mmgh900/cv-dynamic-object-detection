@@ -1,0 +1,10 @@
+build/
+dataset/
+*.zip
+report/report.pdf
+*.aux
+*.log
+*.out
+*.toc
+.DS_Store
+__pycache__/
