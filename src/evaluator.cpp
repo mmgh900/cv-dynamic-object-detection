@@ -1,23 +1,20 @@
-// Author: Filippo Businaro
-// Module owner: Filippo Businaro (ground-truth I/O and IoU metrics).
+// read GT box and compute IoU.
 
 #include "dod.hpp"
 #include <fstream>
-#include <sstream>
 
 namespace dod {
 
 cv::Rect readGT(const std::string& path) {
     std::ifstream in(path);
-    int xmin, ymin, xmax, ymax;
-    if (!(in >> xmin >> ymin >> xmax >> ymax)) return cv::Rect();
-    return cv::Rect(cv::Point(xmin, ymin), cv::Point(xmax, ymax));
+    int x0, y0, x1, y1;
+    if (!(in >> x0 >> y0 >> x1 >> y1)) return {};
+    return cv::Rect(cv::Point(x0, y0), cv::Point(x1, y1));
 }
 
 double iou(const cv::Rect& a, const cv::Rect& b) {
     if (a.area() <= 0 || b.area() <= 0) return 0.0;
-    cv::Rect inter = a & b;
-    double i = inter.area();
+    double i = (a & b).area();
     double u = a.area() + b.area() - i;
     return u > 0 ? i / u : 0.0;
 }

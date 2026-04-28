@@ -1,75 +1,45 @@
-// Author: Filippo Businaro
-// Module owner: Filippo Businaro (dynamic-vs-static classification of tracks).
-//
-// Classifies tracked keypoints as dynamic (on a moving object) vs.
-// static (background) using a displacement-percentile criterion.
-//
-// The dataset has a static or near-static camera (only the car
-// sequence shows a slight pan), so the simplest honest model is:
-// background keypoints have near-zero total displacement across the
-// sequence, object keypoints have a large total displacement. We
-// keep the top percentile of tracks by average per-frame displacement,
-// above a robust absolute floor derived from the median.
+// pick the points that really move (not just camera).
 
 #include "dod.hpp"
 #include <algorithm>
-#include <numeric>
 
 namespace dod {
+namespace {
+constexpr int    kMinObservations = 3;
+constexpr double kKeepFraction    = 0.15;
+constexpr double kFloorPx         = 8.0;
+constexpr double kFloorMedianMul  = 4.0;
+}
 
-// The `ransac_thresh` argument is kept in the signature for API
-// compatibility but is not used by this implementation.
-std::vector<int> classifyDynamicTracks(const std::vector<cv::Mat>& frames_gray,
-                                       std::vector<TrackedPoint>& tracks,
-                                       double /*ransac_thresh*/) {
-    (void)frames_gray;
-
-    struct Item { int idx; double score; int obs; };
+std::vector<int> classifyDynamicTracks(const std::vector<TrackedPoint>& tracks) {
+    struct Item { int idx; double score; };
     std::vector<Item> items;
-    items.reserve(tracks.size());
     for (size_t i = 0; i < tracks.size(); ++i) {
         const auto& t = tracks[i];
-        // inlier_count is repurposed: number of successful matches
-        // residual          : sum of ||p_f - p_0|| over successful matches
-        if (t.inlier_count < 3) continue;
-        double avg = double(t.residual) / double(t.inlier_count);
-        items.push_back({(int)i, avg, t.inlier_count});
+        if (t.n_matches < kMinObservations) continue;
+        items.push_back({(int)i, t.total_disp / (double)t.n_matches});
     }
     if (items.empty()) return {};
 
-    // Robust background-displacement scale from the median.
-    std::vector<double> scores;
-    scores.reserve(items.size());
-    for (const auto& it : items) scores.push_back(it.score);
-    std::vector<double> scores_copy = scores;
-    std::nth_element(scores_copy.begin(),
-                     scores_copy.begin() + scores_copy.size() / 2,
-                     scores_copy.end());
-    double median = scores_copy[scores_copy.size() / 2];
+    // median = how much background moves on average.
+    std::vector<double> s;
+    s.reserve(items.size());
+    for (const auto& it : items) s.push_back(it.score);
+    std::nth_element(s.begin(), s.begin() + s.size() / 2, s.end());
+    double median = s[s.size() / 2];
+    double floor  = std::max(kFloorPx, kFloorMedianMul * median);
 
-    // Top-percentile selection.
+    // sort big to small.
     std::sort(items.begin(), items.end(),
               [](const Item& a, const Item& b){ return a.score > b.score; });
 
-    // Floor chosen to reject small background motions (swaying leaves,
-    // minor parallax, people in the background). Raised from 3x median
-    // to 4x and absolute floor from 6 px to 8 px after the professor's
-    // clarification that the detector must ignore minor bg motion and
-    // near-static objects (e.g. the almost-static sheep in the sheep
-    // sequence).
-    double floor_disp = std::max(8.0, 4.0 * median);
-    int target = std::max(6, (int)(items.size() * 0.15));
-    target = std::min(target, (int)items.size());
-
-    std::vector<int> dynamic_idx;
-    for (int k = 0; k < target; ++k) {
-        if (items[k].score < floor_disp) break;
-        dynamic_idx.push_back(items[k].idx);
+    int target = std::max(6, (int)(items.size() * kKeepFraction));
+    std::vector<int> dyn;
+    for (int k = 0; k < target && k < (int)items.size(); ++k) {
+        if (items[k].score < floor) break; // too small, stop.
+        dyn.push_back(items[k].idx);
     }
-
-    // Tag selected tracks so downstream clustering can weight them.
-    for (int i : dynamic_idx) tracks[i].outlier_count = 1;
-    return dynamic_idx;
+    return dyn;
 }
 
 } // namespace dod

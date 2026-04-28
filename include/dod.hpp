@@ -1,5 +1,3 @@
-// Module owner: Riccardo Pesce (shared API — TrackedPoint struct and
-// cross-module function declarations).
 #pragma once
 #include <opencv2/opencv.hpp>
 #include <string>
@@ -7,66 +5,33 @@
 
 namespace dod {
 
+// one tracked point. n_matches is how many frames it survived,
+// total_disp is total movement after we remove camera motion.
 struct TrackedPoint {
     cv::Point2f first;
     cv::Point2f last;
     std::vector<cv::Point2f> trajectory;
-    bool alive = true;
-    float residual = 0.f;
-    int inlier_count = 0;
-    int outlier_count = 0;
+    int   n_matches  = 0;
+    float total_disp = 0.f;
 };
 
-// feature_tracker.cpp
-std::vector<cv::Point2f> detectFeatures(const cv::Mat& gray_img, int max_corners = 1500);
+std::vector<std::string> listFrames(const std::string& folder);
+
 void trackFeatures(const std::vector<cv::Mat>& frames_gray,
                    std::vector<TrackedPoint>& tracks);
 
-// motion_segmenter.cpp
-// Returns index list of tracks considered dynamic. Implementation uses
-// a displacement-percentile criterion; the third argument is kept for
-// API compatibility and is unused.
-std::vector<int> classifyDynamicTracks(const std::vector<cv::Mat>& frames_gray,
-                                       std::vector<TrackedPoint>& tracks,
-                                       double unused = 0.0);
+std::vector<int> classifyDynamicTracks(const std::vector<TrackedPoint>& tracks);
 
-// bbox_estimator.cpp
 cv::Rect estimateBBox(const std::vector<TrackedPoint>& tracks,
                       const std::vector<int>& dynamic_idx,
                       const cv::Size& img_size);
 
-// Returns the per-cluster bounding boxes discovered by the clustering
-// stage (those with at least `min_pts` supporting keypoints). Used for
-// diagnostic visualisation — the final single-bbox prediction still
-// comes from `estimateBBox`.
-std::vector<cv::Rect> clusterBBoxes(const std::vector<TrackedPoint>& tracks,
-                                    const std::vector<int>& dynamic_idx,
-                                    const cv::Size& img_size,
-                                    int min_pts = 3);
-
-// silhouette_refiner.cpp
-// Takes a coarse bbox from estimateBBox and refines it using a
-// pixel-level motion mask (phase-correlation-warped absdiff + Otsu +
-// morphology + connected components). Falls back to the coarse box if
-// the refinement is implausible.
 cv::Rect refineBBoxSilhouette(const std::vector<cv::Mat>& frames_gray,
                               const cv::Rect& coarse_box,
                               const cv::Size& img_size);
 
-// evaluator.cpp
-struct EvalResult {
-    std::string category;
-    cv::Rect gt;
-    cv::Rect pred;
-    double iou;
-    bool correct; // IoU > 0.5
-};
-
 cv::Rect readGT(const std::string& path);
-double iou(const cv::Rect& a, const cv::Rect& b);
-void writePrediction(const std::string& path, const cv::Rect& box);
-
-// frame loading util
-std::vector<std::string> listFrames(const std::string& folder);
+double   iou(const cv::Rect& a, const cv::Rect& b);
+void     writePrediction(const std::string& path, const cv::Rect& box);
 
 } // namespace dod

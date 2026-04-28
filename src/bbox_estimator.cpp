@@ -1,45 +1,47 @@
-// Author: Riccardo Pesce
-// Module owner: Riccardo Pesce (clustering, MAD outlier rejection, bbox).
-//
-// Clusters dynamic keypoints on the first frame and produces a
-// single bounding box enclosing the dominant cluster.
+// group the moving points, find the biggest group, draw a box.
 
 #include "dod.hpp"
 #include <opencv2/imgproc.hpp>
 #include <queue>
+#include <map>
 
 namespace dod {
+namespace {
+constexpr float kEpsFraction = 0.08f;
+constexpr float kEpsMinPx    = 20.f;
+constexpr int   kMinPts      = 3;
+constexpr float kMergeFactor = 0.6f;
+constexpr float kMadK        = 2.5f;
+constexpr float kMadFloor    = 6.f;
+constexpr int   kPadDivisor  = 6;
+constexpr int   kPadMin      = 6;
+}
 
-// Simple DBSCAN-like clustering by Euclidean proximity.
+// simple DBSCAN-like grouping by distance.
 static std::vector<int> proximityCluster(const std::vector<cv::Point2f>& pts,
                                          float eps, int min_pts) {
-    const int N = (int)pts.size();
+    int N = (int)pts.size();
     std::vector<int> labels(N, -1);
     int cur = 0;
+    auto neighborsOf = [&](int i) {
+        std::vector<int> nb;
+        for (int j = 0; j < N; ++j)
+            if (cv::norm(pts[i] - pts[j]) <= eps) nb.push_back(j);
+        return nb;
+    };
     for (int i = 0; i < N; ++i) {
         if (labels[i] != -1) continue;
-
-        std::vector<int> neighbors;
-        for (int j = 0; j < N; ++j) {
-            if (cv::norm(pts[i] - pts[j]) <= eps) neighbors.push_back(j);
-        }
-        if ((int)neighbors.size() < min_pts) {
-            labels[i] = 0; // noise
-            continue;
-        }
-
-        cur++;
+        auto nb = neighborsOf(i);
+        if ((int)nb.size() < min_pts) { labels[i] = 0; continue; }
+        labels[i] = ++cur;
         std::queue<int> q;
-        for (int n : neighbors) q.push(n);
-        labels[i] = cur;
+        for (int n : nb) q.push(n);
         while (!q.empty()) {
             int k = q.front(); q.pop();
             if (labels[k] == 0) labels[k] = cur;
             if (labels[k] != -1) continue;
             labels[k] = cur;
-            std::vector<int> kn;
-            for (int j = 0; j < N; ++j)
-                if (cv::norm(pts[k] - pts[j]) <= eps) kn.push_back(j);
+            auto kn = neighborsOf(k);
             if ((int)kn.size() >= min_pts)
                 for (int v : kn) q.push(v);
         }
@@ -47,154 +49,81 @@ static std::vector<int> proximityCluster(const std::vector<cv::Point2f>& pts,
     return labels;
 }
 
+static float medianFloor(std::vector<float>& v, float floor) {
+    auto m = v.size() / 2;
+    std::nth_element(v.begin(), v.begin() + m, v.end());
+    return std::max(floor, v[m]);
+}
+
 cv::Rect estimateBBox(const std::vector<TrackedPoint>& tracks,
                       const std::vector<int>& dynamic_idx,
                       const cv::Size& img_size) {
-    if (dynamic_idx.empty()) return cv::Rect();
-
-    std::vector<cv::Point2f> pts;
-    std::vector<float> weights;
-    pts.reserve(dynamic_idx.size());
-    for (int i : dynamic_idx) {
-        pts.push_back(tracks[i].first);
-        int tot = tracks[i].inlier_count + tracks[i].outlier_count;
-        float w = tot > 0 ? (float)tracks[i].outlier_count / (float)tot : 0.f;
-        weights.push_back(w);
-    }
-
-    // Eps chosen relative to image diagonal so it generalises.
-    float diag = std::sqrt((float)(img_size.width * img_size.width
-                                 + img_size.height * img_size.height));
-    float eps = std::max(20.f, diag * 0.08f);
-    auto labels = proximityCluster(pts, eps, 3);
-
-    // Score each cluster by summed outlier weight.
-    std::map<int, float> score;
-    std::map<int, int> count;
-    std::map<int, cv::Rect> cbox;
-    for (size_t i = 0; i < labels.size(); ++i) {
-        if (labels[i] <= 0) continue;
-        score[labels[i]] += weights[i];
-        count[labels[i]] += 1;
-    }
-    if (score.empty()) {
-        std::vector<cv::Point2f> all;
-        for (int i : dynamic_idx) all.push_back(tracks[i].first);
-        return cv::boundingRect(all);
-    }
-
-    // Build per-cluster bbox.
-    std::map<int, std::vector<cv::Point2f>> cluster_pts;
-    for (size_t i = 0; i < labels.size(); ++i)
-        if (labels[i] > 0) cluster_pts[labels[i]].push_back(pts[i]);
-    for (auto& kv : cluster_pts) cbox[kv.first] = cv::boundingRect(kv.second);
-
-    // Pick the best cluster, then merge every other cluster whose
-    // bounding box is close to (or overlaps with) the best one, so
-    // that a single object whose keypoints are split across two
-    // sub-clusters (e.g. head + body of a sheep) is recovered.
-    int best = -1; float best_s = -1;
-    for (auto& kv : score) {
-        if (count[kv.first] < 3) continue;
-        if (kv.second > best_s) { best_s = kv.second; best = kv.first; }
-    }
-    if (best < 0) {
-        std::vector<cv::Point2f> all;
-        for (int i : dynamic_idx) all.push_back(tracks[i].first);
-        return cv::boundingRect(all);
-    }
-
-    std::vector<cv::Point2f> cluster = cluster_pts[best];
-    cv::Rect seed = cbox[best];
-    float merge_gap = eps * 0.6f;
-    for (auto& kv : cluster_pts) {
-        if (kv.first == best) continue;
-        cv::Rect r = cbox[kv.first];
-        cv::Rect expanded(seed.x - (int)merge_gap, seed.y - (int)merge_gap,
-                          seed.width + 2 * (int)merge_gap,
-                          seed.height + 2 * (int)merge_gap);
-        if ((r & expanded).area() > 0 && count[kv.first] >= 2) {
-            cluster.insert(cluster.end(), kv.second.begin(), kv.second.end());
-        }
-    }
-
-    // Reject outliers within the cluster using median absolute
-    // deviation. Classical CV technique for robust spread estimation.
-    if (cluster.size() >= 6) {
-        std::vector<float> xs, ys;
-        xs.reserve(cluster.size()); ys.reserve(cluster.size());
-        for (const auto& p : cluster) { xs.push_back(p.x); ys.push_back(p.y); }
-        std::nth_element(xs.begin(), xs.begin()+xs.size()/2, xs.end());
-        std::nth_element(ys.begin(), ys.begin()+ys.size()/2, ys.end());
-        float mx = xs[xs.size()/2], my = ys[ys.size()/2];
-        std::vector<float> dx, dy;
-        dx.reserve(cluster.size()); dy.reserve(cluster.size());
-        for (const auto& p : cluster) {
-            dx.push_back(std::fabs(p.x - mx));
-            dy.push_back(std::fabs(p.y - my));
-        }
-        std::nth_element(dx.begin(), dx.begin()+dx.size()/2, dx.end());
-        std::nth_element(dy.begin(), dy.begin()+dy.size()/2, dy.end());
-        float madx = std::max(6.f, dx[dx.size()/2]);
-        float mady = std::max(6.f, dy[dy.size()/2]);
-        // Tightened from 3.0 to 2.5 after observing that over-extent
-        // of the bbox was the dominant failure mode on bird/sheep.
-        const float k_mad = 2.5f;
-        std::vector<cv::Point2f> kept;
-        for (const auto& p : cluster) {
-            if (std::fabs(p.x - mx) <= k_mad * madx &&
-                std::fabs(p.y - my) <= k_mad * mady) {
-                kept.push_back(p);
-            }
-        }
-        if (kept.size() >= 4) cluster = kept;
-    }
-    cv::Rect box = cv::boundingRect(cluster);
-
-    // Pad box slightly to cover full object footprint (points are
-    // typically detected on texture inside, not at silhouette).
-    int pad_x = std::max(6, box.width / 6);
-    int pad_y = std::max(6, box.height / 6);
-    box.x -= pad_x; box.y -= pad_y;
-    box.width += 2 * pad_x; box.height += 2 * pad_y;
-    box &= cv::Rect(0, 0, img_size.width, img_size.height);
-    return box;
-}
-
-// Diagnostic: return every cluster's bounding box (not just the winner).
-// Uses the same proximity-clustering as estimateBBox; the threshold and
-// min-points settings are kept in sync.
-std::vector<cv::Rect> clusterBBoxes(const std::vector<TrackedPoint>& tracks,
-                                    const std::vector<int>& dynamic_idx,
-                                    const cv::Size& img_size,
-                                    int min_pts) {
-    std::vector<cv::Rect> out;
-    if (dynamic_idx.empty()) return out;
+    if (dynamic_idx.empty()) return {};
 
     std::vector<cv::Point2f> pts;
     pts.reserve(dynamic_idx.size());
     for (int i : dynamic_idx) pts.push_back(tracks[i].first);
 
+    // eps depends on image size.
     float diag = std::sqrt((float)(img_size.width * img_size.width
                                  + img_size.height * img_size.height));
-    float eps = std::max(20.f, diag * 0.08f);
-    auto labels = proximityCluster(pts, eps, min_pts);
+    float eps  = std::max(kEpsMinPx, diag * kEpsFraction);
+    auto labels = proximityCluster(pts, eps, kMinPts);
 
     std::map<int, std::vector<cv::Point2f>> by_label;
     for (size_t i = 0; i < labels.size(); ++i)
         if (labels[i] > 0) by_label[labels[i]].push_back(pts[i]);
+    if (by_label.empty()) return cv::boundingRect(pts);
+
+    // biggest group wins.
+    int best = -1; size_t best_n = 0;
+    for (auto& kv : by_label)
+        if (kv.second.size() > best_n) { best_n = kv.second.size(); best = kv.first; }
+
+    std::vector<cv::Point2f> cluster = by_label[best];
+    cv::Rect seed = cv::boundingRect(cluster);
+
+    // also take groups that touch the winner (e.g. head + body).
+    int gap = (int)(eps * kMergeFactor);
+    cv::Rect expanded(seed.x - gap, seed.y - gap,
+                      seed.width + 2 * gap, seed.height + 2 * gap);
     for (auto& kv : by_label) {
-        if ((int)kv.second.size() < min_pts) continue;
+        if (kv.first == best) continue;
         cv::Rect r = cv::boundingRect(kv.second);
-        // Small padding consistent with estimateBBox.
-        int pad_x = std::max(4, r.width / 8);
-        int pad_y = std::max(4, r.height / 8);
-        r.x -= pad_x; r.y -= pad_y;
-        r.width += 2 * pad_x; r.height += 2 * pad_y;
-        r &= cv::Rect(0, 0, img_size.width, img_size.height);
-        if (r.area() > 0) out.push_back(r);
+        if ((r & expanded).area() > 0)
+            cluster.insert(cluster.end(), kv.second.begin(), kv.second.end());
     }
-    return out;
+
+    // throw away points too far from the median.
+    if (cluster.size() >= 6) {
+        std::vector<float> xs, ys;
+        for (const auto& p : cluster) { xs.push_back(p.x); ys.push_back(p.y); }
+        std::nth_element(xs.begin(), xs.begin() + xs.size() / 2, xs.end());
+        std::nth_element(ys.begin(), ys.begin() + ys.size() / 2, ys.end());
+        float mx = xs[xs.size() / 2], my = ys[ys.size() / 2];
+        std::vector<float> dx, dy;
+        for (const auto& p : cluster) {
+            dx.push_back(std::fabs(p.x - mx));
+            dy.push_back(std::fabs(p.y - my));
+        }
+        float madx = medianFloor(dx, kMadFloor);
+        float mady = medianFloor(dy, kMadFloor);
+        std::vector<cv::Point2f> kept;
+        for (const auto& p : cluster)
+            if (std::fabs(p.x - mx) <= kMadK * madx &&
+                std::fabs(p.y - my) <= kMadK * mady)
+                kept.push_back(p);
+        if (kept.size() >= 4) cluster = kept;
+    }
+
+    // box around the points + a bit of padding.
+    cv::Rect box = cv::boundingRect(cluster);
+    int padx = std::max(kPadMin, box.width  / kPadDivisor);
+    int pady = std::max(kPadMin, box.height / kPadDivisor);
+    box.x -= padx; box.y -= pady;
+    box.width  += 2 * padx;
+    box.height += 2 * pady;
+    return box & cv::Rect(0, 0, img_size.width, img_size.height);
 }
 
 } // namespace dod

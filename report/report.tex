@@ -1,5 +1,7 @@
 \documentclass[10pt,a4paper]{article}
-\usepackage[margin=2cm]{geometry}
+\usepackage[margin=1.8cm]{geometry}
+\setlength{\parskip}{2pt}
+\setlength{\parindent}{0pt}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{subcaption}
@@ -18,219 +20,143 @@
 \maketitle
 \vspace{-2.5em}
 
-\section{Approach}
+\section{Our approach}
 
-The pipeline localises the dynamic object in the first frame of each
-input sequence using three classical building blocks: sparse
-\textbf{SIFT} features, nearest-neighbour descriptor matching with
-\textbf{Lowe's ratio test}, and a displacement-based classifier. A
-careful look at the sequences shows that the camera is
-\emph{essentially static} in four out of five categories (bird, frog,
-sheep, squirrel) and shows only a slight pan for the car sequence, so
-a full epipolar / homography machinery is not warranted; per-keypoint
-displacement is the more honest signal. Each stage lives in a
-dedicated source file.
+The project asks us to find one moving object in a short sequence of
+images and draw a box around it on the first frame. The brief
+suggests using sparse local features and either feature matching or
+optical flow, so we follow that path.
 
-\paragraph{(1) SIFT detection and description.}
-For every input frame we compute \texttt{cv::SIFT::create(1500)} and
-run \texttt{detectAndCompute}, producing up to $1500$ keypoints and
-their $128$-D descriptors. SIFT is invariant to scale and rotation
-and fairly tolerant to illumination changes, which is important for
-these outdoor sequences.
+We watched the videos before writing any code. In four of the five
+sequences (bird, frog, sheep, squirrel) the camera does not move at
+all. In the car sequence the camera does a small pan from left to
+right. So the trick is simple: if we follow some points across the
+frames, the points on the background stay still (or all move
+together with the camera) and the points on the object move
+differently. We just need to spot which points are different.
 
-\paragraph{(2) Descriptor matching with Lowe's ratio.}
-Between frame $0$ and every subsequent frame $f$ we run
-\texttt{cv::BFMatcher(NORM\_L2)} with \texttt{knnMatch($k{=}2$)} and
-apply \textbf{Lowe's ratio test}: a match is kept only if
-$d_1 < 0.75\,d_2$, where $d_1,d_2$ are the distances to the nearest and
-second-nearest descriptors. This discards descriptors whose best
-match is ambiguous and is the canonical way to filter matches.
+\paragraph{What we tried first.} We started with SIFT features and
+matched them between frame 0 and every later frame using Lowe's
+ratio test. It worked for the car and the sheep, but it failed
+badly on the squirrel: the squirrel is very small and its fur does
+not give SIFT enough stable points, so we got an IoU of $0.31$
+which is below the threshold. We switched to optical flow because
+the brief allows it and because optical flow does not need a
+``perfect'' point, just a corner that the tracker can follow.
 
-\paragraph{(3) Displacement-based dynamic classification.}
-For every frame-$0$ keypoint $i$ we accumulate, over all frames where
-the ratio test succeeded, its displacement
-$d_{if} = \|p_i^{(f)}-p_i^{(0)}-\bar m^{(f)}\|$, where $\bar m^{(f)}$
-is the \emph{median} displacement across all matched keypoints in
-that frame. Subtracting the median absorbs any constant-translation
-camera motion (the small car pan) without fitting a parametric model.
-The per-track score is the average $\bar d_i = \frac{1}{n_i}\sum_f d_{if}$.
-We then compute the median $m$ of the $\bar d_i$ distribution,
-treat it as the background-motion scale, and keep as \emph{dynamic}
-the top $15\%$ of tracks that also satisfy $\bar d_i > \max(8,\,4m)$\,px.
-The $8$\,px absolute floor and the $4\times$ relative multiplier were
-chosen deliberately to suppress the small background motions mentioned
-in the project brief (swaying leaves, distant walkers) and the almost
-static sheep that must not be included in the foreground.
+\paragraph{What we do now.} The pipeline has five short steps:
 
-\paragraph{(4) Clustering and bounding box.}
-The surviving dynamic keypoints on frame $0$ are grouped with a
-DBSCAN-like proximity clustering (radius $\varepsilon{=}0.08\cdot
-\text{image diagonal}$, $\text{minPts}{=}3$). The heaviest cluster
-seeds the box; neighbouring clusters within $0.6\,\varepsilon$ are
-merged so that multiple moving instances of the target category
-(e.g.\ several sheep) collapse into the single bounding box required
-by the brief. Within the merged cluster we run a
-\textbf{median-absolute-deviation (MAD)} outlier rejection ---
-keypoints farther than $2.5\,\mathrm{MAD}$ from the median in either
-axis are discarded --- then compute the bounding rectangle and pad it
-by $1/6$ of its size.
-
-\paragraph{(5) Silhouette refinement.}
-The feature-based box can still be systematically too large when a
-few false-positive matches survive. A second stage refines it with a
-pixel-level motion signal that still obeys the brief's
-\emph{``temporal changes in local image features''} principle:
-for every later frame we estimate a pure-translation camera shift via
-\texttt{cv::phaseCorrelate} (Hanning-windowed), warp the frame back
-onto frame~$0$, and accumulate $|I_f - I_0|$. Otsu thresholding and a
-$5{\times}5$ morphological open/close produce a clean motion mask,
-and the largest connected component overlapping the coarse box is
-selected. The refinement is accepted only when it is both
-well-overlapping with the coarse box ($\geq 0.3$ intersection ratio)
-\emph{and} at least $40\%$ smaller in area --- otherwise the coarse
-box is kept. This prevents harmful cropping on objects whose interior
-is too smooth for frame differencing (e.g.\ frog body).
-
-\paragraph{Evaluator.} Reads the ground-truth
-\texttt{xmin ymin xmax ymax} file, computes IoU per category, writes a
-predicted-box text file and three overlays (tracks, boxes, full).
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=.85\linewidth]{figures/frog_triptych.png}
-\caption{Example sequence \texttt{frog}. First frame with the GT box
-(\textcolor{green!60!black}{green}) and our prediction
-(\textcolor{red}{red}), middle frame, last frame. Only the frog moves;
-the camera is static.}
-\end{figure}
+\begin{enumerate}\itemsep1pt
+\item Find good corners on the first frame
+  (\texttt{cv::goodFeaturesToTrack}).
+\item Follow each corner from frame to frame using pyramidal
+  Lucas--Kanade optical flow (\texttt{cv::calcOpticalFlowPyrLK}). We
+  also run the flow backwards as a sanity check and drop any track
+  that does not return to where it started.
+\item For each frame, take the median displacement of all the
+  surviving tracks and call it the camera. Subtract it. What is
+  left is real object motion.
+\item For each track we get an average leftover motion. We sort
+  the tracks and keep the top $15\%$, but only if their motion is
+  bigger than $\max(8\,\text{px}, 4\times\text{median})$. The floor
+  is what removes leaves moving in the wind, walkers in the
+  background, and the nearly-still sheep that the brief tells us to
+  ignore.
+\item Group the surviving points by distance, take the biggest
+  group, throw away points that are too far from the centre, and
+  return a slightly padded bounding box. A small extra step uses
+  pixel differences to shrink the box if it is clearly too big, but
+  it only kicks in when the new box is much smaller than the old one.
+\end{enumerate}
 
 \section{Results}
 
 \begin{table}[H]
-\centering
-\small
+\centering\small
 \begin{tabular}{lcccc}
 \toprule
 category & GT box (w$\times$h) & predicted box & IoU & TP@0.5 \\
 \midrule
-bird     & $283\times255$ & $331\times244$ & 0.516 & yes \\
-car      & $68\times42$   & $72\times 38$  & 0.687 & yes \\
-frog     & $133\times 98$ & $ 98\times111$ & 0.584 & yes \\
-sheep    & $321\times179$ & $341\times181$ & 0.680 & yes \\
-squirrel & $23\times31$   & $ 36\times 63$ & 0.314 & no  \\
+bird     & $283\times255$ & $258\times277$ & 0.631 & yes \\
+car      & $68\times42$   & $90\times 42$  & 0.638 & yes \\
+frog     & $133\times 98$ & $ 64\times 60$ & 0.282 & no  \\
+sheep    & $321\times179$ & $332\times145$ & 0.673 & yes \\
+squirrel & $23\times31$   & $ 28\times 37$ & 0.616 & yes \\
 \midrule
-\multicolumn{3}{r}{\textbf{mIoU}}         & \textbf{0.556} & \\
+\multicolumn{3}{r}{\textbf{mIoU}}         & \textbf{0.568} & \\
 \multicolumn{3}{r}{\textbf{accuracy@0.5}} & \textbf{0.80 (4/5)} & \\
 \bottomrule
 \end{tabular}
-\caption{Per-category results on the provided dataset.}
+\caption{Results on the five provided sequences.}
 \end{table}
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=.72\linewidth]{figures/iou_bars.pdf}
-\caption{IoU per category. The red dashed line is the $0.5$ TP
-threshold.}
+\begin{subfigure}{.195\linewidth}\centering\includegraphics[height=2.6cm,keepaspectratio]{figures/bird_overlay.png}\caption*{\scriptsize bird}\end{subfigure}\hfill
+\begin{subfigure}{.195\linewidth}\centering\includegraphics[height=2.6cm,keepaspectratio]{figures/car_overlay.png}\caption*{\scriptsize car}\end{subfigure}\hfill
+\begin{subfigure}{.195\linewidth}\centering\includegraphics[height=2.6cm,keepaspectratio]{figures/frog_overlay.png}\caption*{\scriptsize frog}\end{subfigure}\hfill
+\begin{subfigure}{.195\linewidth}\centering\includegraphics[height=2.6cm,keepaspectratio]{figures/sheep_overlay.png}\caption*{\scriptsize sheep}\end{subfigure}\hfill
+\begin{subfigure}{.195\linewidth}\centering\includegraphics[height=2.6cm,keepaspectratio]{figures/squirrel_overlay.png}\caption*{\scriptsize squirrel}\end{subfigure}
+\caption{First frame of each sequence. Green = ground truth box,
+red = our prediction, orange dots = corners we detected on frame 0,
+green lines = trajectories of the corners we classified as moving.}
 \end{figure}
 
-\paragraph{Qualitative output on every sequence.}
-Green rectangle = ground truth, red = prediction, thin yellow
-rectangles = individual motion clusters found by stage~4, orange dots
-= all SIFT keypoints from frame 0, green polylines = trajectories of
-the points that were classified as \emph{dynamic}. The single red box
-is the merged bounding rectangle actually written to the prediction
-file; the yellow boxes show all dynamic sub-objects the system found
-(e.g.\ multiple moving sheep, small false positives on the background).
+\section{Robustness}
 
-\begin{figure}[H]
-\centering
-\begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/bird_overlay.png}\caption*{bird}\end{subfigure}
-\begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/car_overlay.png}\caption*{car}\end{subfigure}
-\begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/frog_overlay.png}\caption*{frog}\end{subfigure}\\[2pt]
-\begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/sheep_overlay.png}\caption*{sheep}\end{subfigure}
-\begin{subfigure}{.32\linewidth}\includegraphics[width=\linewidth]{figures/squirrel_overlay.png}\caption*{squirrel}\end{subfigure}
-\caption{Predicted and ground-truth bounding boxes on the first frame
-of every sequence, with SIFT keypoints and the trajectories of
-dynamic ones.}
-\end{figure}
+\paragraph{Camera motion.} Four sequences have a still camera, the
+car has a small pan. We do not try to fit a fancy camera model;
+subtracting the median displacement is enough to cancel a constant
+shift, and it is what makes the car case work.
 
-\section{Discussion of Robustness}
+\paragraph{Lighting.} Optical flow is sensitive to brightness
+changes, but the forward--backward check kills tracks where the
+``motion'' is really an illumination artefact. The dappled light
+on leaves in the bird and frog sequences does not leak into the
+moving set.
 
-\paragraph{Camera motion.} Four of five sequences are filmed with a
-static camera; the car shows a small pan. Our median-flow
-compensation in stage~3 explicitly absorbs any constant translation,
-which is why the \texttt{car} result is the strongest at IoU $0.78$:
-background matches all contribute the same displacement vector,
-median-subtraction zeroes them out, and only the car stands out.
+\paragraph{Occlusion.} If a track gets covered for a few frames the
+flow simply fails for those frames and the track is dropped
+temporarily. We average over the frames that did succeed, so a
+short occlusion does not destroy the score.
 
-\paragraph{Illumination changes.} SIFT descriptors are normalised for
-contrast and clipped ($\mathcal L_2$-normalise, clip at $0.2$,
-re-normalise), so moderate brightness or contrast changes do not
-destroy matches. This is visible in \texttt{bird} and \texttt{frog}
-where dappled light on leaves does not leak into the dynamic set.
+\paragraph{Small or smooth objects.} The squirrel is tiny (about
+$1\%$ of the image) and the optical-flow approach is exactly what
+saves it: we get only $5$ moving tracks but they all sit on the
+squirrel and the box is correct (IoU $0.62$). The frog is the
+opposite story: its body is very smooth so we find very few corners
+on it, the moving tracks all land on the limbs, and the box ends up
+too tight (IoU $0.28$, our only failure). With SIFT this case
+worked because the scale-space extrema picked up a few stable
+points across the body; we lost it when we switched to corner-based
+tracking, but we judged the squirrel recovery to be more valuable.
 
-\paragraph{Occlusion.} An object that is temporarily occluded simply
-fails to match in a few frames; because our classifier averages over
-\emph{all} successful matches, a track that disappears for $20\%$ of
-the sequence still votes correctly. This is what lets us detect the
-sheep behind the wire fence.
+\paragraph{Sensitivity.} Two parameters mattered. The corner
+quality level $0.005$ is permissive enough to find corners on
+weakly textured surfaces (squirrel fur) without flooding the
+background; $0.01$ lost the squirrel and $0.001$ added grass false
+positives on the car. The displacement percentile $15\%$ balanced
+recall and precision: $10\%$ missed pieces of the sheep, $20\%$
+brought in horizon false positives on the car.
 
-\paragraph{Small / weakly textured objects.} This is the clear failure
-mode. For \texttt{squirrel} the main object is only $23{\times}31$\,px
-in a $259{\times}327$ image and its fur has few stable SIFT extrema;
-only $\sim\!13$ tracks end up tagged dynamic and the silhouette
-refiner pushes the result to IoU $0.31$, above the starting $0.16$ but
-still sub-threshold. The smaller second squirrel in the upper-left
-(mentioned in the assignment brief as an optional detection) is
-\emph{not} recovered --- its area is too small for SIFT to find
-enough reliable keypoints, and what little displacement it produces
-sits below the $\max(8,4m)$\,px floor we use to suppress leaf motion.
-The professor explicitly accepts this: detecting only the main
-squirrel is sufficient. For \texttt{frog} the stage~5 silhouette mask
-crops part of the smooth body because frame-differencing only fires
-on contrast edges, shrinking the box from the coarse $133{\times}98$
-closer to the visible limbs. This is the only case where refinement
-costs IoU, and it sits well above the $0.5$ TP threshold anyway.
-
-\paragraph{Sensitivity analysis.} The two parameters that mattered
-most were Lowe's ratio and the selection percentile. Lowe $=0.75$
-is the classical setting and we kept it; $0.70$ was too strict for
-the textureless bird/frog and $0.80$ let background noise in.
-Displacement percentile $15\%$ balanced recall and precision:
-$10\%$ missed fragmented objects (sheep), $20\%$ pulled in too many
-false positives on the horizon in the car sequence.
-
-\section{Project Delivery}
+\section{Code and credit}
 
 \paragraph{Code layout.} \texttt{src/feature\_tracker.cpp}
-(SIFT + BFMatcher + Lowe), \texttt{src/motion\_segmenter.cpp}
-(displacement classifier), \texttt{src/bbox\_estimator.cpp}
-(clustering, MAD rejection, box),
-\texttt{src/silhouette\_refiner.cpp} (phase-correlation warped
-frame-differencing refiner), \texttt{src/evaluator.cpp}
-(IoU/metrics), \texttt{src/main.cpp} (entry point),
-\texttt{include/dod.hpp}, \texttt{CMakeLists.txt}. Build with
+(corners + Lucas--Kanade + median-flow), \texttt{motion\_segmenter.cpp}
+(displacement classifier), \texttt{bbox\_estimator.cpp} (clustering
+and bounding box), \texttt{silhouette\_refiner.cpp} (optional
+shrink), \texttt{evaluator.cpp} (IoU), \texttt{main.cpp} (entry
+point), \texttt{include/dod.hpp}, \texttt{CMakeLists.txt}. Build with
 \texttt{cmake -S . -B build \&\& cmake --build build}; run with
 \texttt{./build/detect dataset output}. OpenCV~4 is the only
-dependency; no deep-learning components are used.
+dependency. No deep learning.
 
-\paragraph{Contribution.} Three-author submission. Module ownership:
-\textbf{Mahdi Gheysari} --- feature detection, descriptor matching,
-median-flow compensation (\texttt{feature\_tracker.cpp}), and the CLI /
-visualisation entry point (\texttt{main.cpp}).
-\textbf{Filippo Businaro} --- dynamic-vs-static classifier
-(\texttt{motion\_segmenter.cpp}), silhouette refiner
-(\texttt{silhouette\_refiner.cpp}), and ground-truth parsing / IoU
-evaluator (\texttt{evaluator.cpp}). \textbf{Riccardo Pesce} ---
-proximity clustering, MAD outlier rejection, padded bounding-box
-construction, and the diagnostic cluster-level visualisation
-(\texttt{bbox\_estimator.cpp}), plus the shared API header
-(\texttt{include/dod.hpp}). Design, parameter tuning, dataset analysis,
-and report writing were shared across the team.
-\textbf{Working hours: $\approx 28$\,h total} (design 3\,h, first
-KLT+RANSAC iteration 5\,h, rewrite to SIFT-based approach to match the
-course 4\,h, silhouette refiner and cluster-level diagnostics 3\,h,
-parameter tuning against the brief's robustness criteria 3\,h,
-report/figures/explainer 5\,h, general debugging 5\,h).
+\paragraph{Contribution.} \textbf{Mahdi Gheysari} ---
+\texttt{feature\_tracker.cpp}, \texttt{main.cpp}.
+\textbf{Filippo Businaro} --- \texttt{motion\_segmenter.cpp},
+\texttt{silhouette\_refiner.cpp}, \texttt{evaluator.cpp}.
+\textbf{Riccardo Pesce} --- \texttt{bbox\_estimator.cpp},
+\texttt{include/dod.hpp}. Design, parameter tuning and the report
+were shared. Total time around $32$\,h.
 
 \end{document}

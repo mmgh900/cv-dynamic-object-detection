@@ -6,37 +6,44 @@ a moving object in the first frame of an RGB image sequence using
 
 ## Pipeline
 
-1. **SIFT features** – `cv::SIFT::create(1500)` + `detectAndCompute`
-   on every frame (128-D descriptors).
-2. **Descriptor matching** – `cv::BFMatcher(NORM_L2)` with
-   `knnMatch(k=2)` between frame 0 and every later frame, filtered by
-   **Lowe's ratio test** at 0.75.
+The brief recommends "sparse local features + robust feature matching
+or **optical flow**". We follow the optical-flow path:
+
+1. **Shi–Tomasi corners on frame 0** – `cv::goodFeaturesToTrack`
+   (maxCorners 1500, qualityLevel 0.005, minDistance 5, blockSize 7).
+2. **Pyramidal Lucas–Kanade tracking** – `cv::calcOpticalFlowPyrLK`
+   propagates each corner frame-by-frame (window 21×21, 3 levels)
+   with a forward–backward consistency filter (max round-trip drift
+   1.5 px).
 3. **Median-flow subtraction** – per frame, the median displacement
-   across matched keypoints is subtracted from each match to cancel
-   any constant camera translation (covers the slight car pan).
+   across surviving tracks is subtracted to cancel constant camera
+   motion (covers the slight car pan).
 4. **Dynamic classification** – average residual displacement per
-   track; keep the top 15% above `max(8 px, 4 × median)`. The floor is
-   tuned to reject swaying leaves, distant walkers, and near-static
-   objects (e.g. the almost-static sheep) as required by the brief.
+   track; keep the top 15% above `max(8 px, 4 × median)`. The floor
+   rejects swaying leaves, distant walkers, and near-static objects
+   (e.g. the almost-static sheep) as required by the brief.
 5. **Clustering + bbox** – DBSCAN-like proximity clustering, neighbour
-   merging, MAD outlier rejection at 2.5σ, padded bounding box. All
-   individual clusters are also exposed for diagnostic visualisation.
-6. **Silhouette refinement** – phase-correlation warped frame
+   merging, MAD outlier rejection at 2.5σ, padded bounding box.
+6. **Silhouette refinement (gated)** – phase-correlation warped frame
    differencing + Otsu + morphology + largest connected component,
-   gated so it only replaces the coarse box when the refined box
-   overlaps well and is meaningfully smaller.
+   accepted only when meaningfully smaller than the coarse box.
+
+The first iteration used SIFT + BFMatcher + Lowe's ratio test in
+place of stages 1–2; it underperformed on small/textureless objects
+(squirrel IoU 0.31, sub-threshold) which is why we switched to the
+optical-flow front-end.
 
 ## Results on the provided dataset
 
 | category | IoU | TP@0.5 |
 |----------|-----|--------|
-| bird     | 0.516 | yes |
-| car      | 0.687 | yes |
-| frog     | 0.584 | yes |
-| sheep    | 0.680 | yes |
-| squirrel | 0.314 | no  |
+| bird     | 0.631 | yes |
+| car      | 0.638 | yes |
+| frog     | 0.282 | no  |
+| sheep    | 0.673 | yes |
+| squirrel | 0.616 | yes |
 
-**mIoU = 0.556, accuracy@0.5 = 0.80 (4/5).**
+**mIoU = 0.568, accuracy@0.5 = 0.80 (4/5).**
 
 ## Build and run
 
@@ -66,7 +73,7 @@ LaTeX source: [report/report.tex](report/report.tex). Compile with
 ```
 include/dod.hpp
 src/
-  feature_tracker.cpp   -- SIFT + BFMatcher + Lowe ratio + median flow
+  feature_tracker.cpp   -- Shi-Tomasi + Lucas-Kanade + forward-backward + median flow
   motion_segmenter.cpp  -- displacement-percentile dynamic classifier
   bbox_estimator.cpp    -- clustering + MAD + bbox + per-cluster helper
   silhouette_refiner.cpp -- phase-correlation warped absdiff + Otsu refine

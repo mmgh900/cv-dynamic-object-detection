@@ -135,8 +135,8 @@ explaining what ``interesting corner'', ``find the same dot'',
     owner/.style={font=\scriptsize\itshape},
     arr/.style  ={-{Stealth[length=2.2mm]}, thick}
 ]
-\node[stage, fill=mBlue!15]   (s1) {1.~Find SIFT points\\{\scriptsize on every frame, up to 1500}};
-\node[stage, fill=mBlue!15, right=of s1] (s2) {2.~Match frame 0 $\to f$\\{\scriptsize + Lowe's ratio test}};
+\node[stage, fill=mBlue!15]   (s1) {1.~Shi--Tomasi corners\\{\scriptsize on frame 0, up to 1500}};
+\node[stage, fill=mBlue!15, right=of s1] (s2) {2.~Track with LK\\{\scriptsize + forward--backward check}};
 \node[stage, fill=mBlue!15, right=of s2] (s3) {3.~Cancel camera drift\\{\scriptsize subtract the median}};
 
 \node[stage, fill=mGreen!20, below=1.2cm of s1] (s4) {4.~Pick the movers\\{\scriptsize top 15\%, floor $\max(8,4m)$}};
@@ -171,96 +171,86 @@ whoever wrote it.}
 
 \section{The method, step by step}
 
-\subsection{Step 1 --- Finding interesting points (SIFT)}
+\subsection{What we tried first: SIFT + Lowe's ratio}
+
+Our initial implementation used \textbf{SIFT} keypoints
+(\texttt{cv::SIFT::create(1500)}) matched between frame~0 and every
+later frame with \texttt{cv::BFMatcher(NORM\_L2)} and \textbf{Lowe's
+ratio test} at $0.75$. SIFT is the textbook scale- and
+rotation-invariant detector,\footnote{D.~G.~Lowe.
+\emph{Distinctive image features from scale-invariant keypoints.}
+IJCV, 60(2):91--110, 2004.} and the OpenCV docs ship a tutorial that
+is essentially this exact pipeline.\footnote{OpenCV,
+\emph{Feature Matching} (4.x),
+\url{https://docs.opencv.org/4.x/dc/dc3/tutorial_py_matcher.html}.}
+
+It worked on car and sheep but underperformed on the small or
+weakly-textured objects: SIFT scale-invariant extrema do not anchor
+reliably on the squirrel's fur or the smooth regions of the frog's
+skin, so only $\sim\!13$ tracks ended up tagged dynamic on those
+sequences and the resulting bounding box was too small (squirrel
+IoU $0.31$, sub-threshold).
+
+The brief gives us another option: \emph{``\dots\ robust feature
+matching or \textbf{optical flow} techniques.''} Optical flow
+doesn't need a stable scale-space extremum; it only needs a corner
+strong enough for Lucas--Kanade to track. So we re-built the
+front-end on \textbf{Shi--Tomasi corners + pyramidal Lucas--Kanade},
+which is what the rest of this section describes.
+
+\subsection{Step 1 --- Finding interesting points (Shi--Tomasi)}
 
 We need ``interesting'' pixels --- ones we can find again later. A
-flat patch of sky is useless; a brick corner is great.
+flat patch of sky is useless; a brick corner is great. The classical
+test for ``cornerness'' is the Shi--Tomasi response: at each pixel,
+look at the smaller eigenvalue of the local image-gradient covariance
+matrix. Points where it's large in both directions are corners.
 
-We use \textbf{SIFT}\footnote{Docs:
-\url{https://docs.opencv.org/4.x/d7/d60/classcv_1_1SIFT.html};
-intro tutorial:
-\url{https://docs.opencv.org/4.x/da/df5/tutorial_py_sift_intro.html}.}:
-\texttt{cv::SIFT::create(1500)} followed by
-\texttt{detectAndCompute}. For every frame this gives us up to 1500
-\emph{keypoints} (where the interesting spots are) and a 128-number
-\emph{descriptor} for each one (basically a summary of what the
-neighbourhood around the keypoint looks like).
-
-Why SIFT? Three reasons:
+We use \texttt{cv::goodFeaturesToTrack}\footnote{Docs:
+\url{https://docs.opencv.org/4.x/dd/d1a/group__imgproc__feature.html\#ga1d6bb77486c8f92d79c8793ad995d541}.}
+on frame~0 with these arguments:
 
 \begin{itemize}\itemsep2pt
-\item \textbf{Scale-invariant.} SIFT looks at the image at several
-  zoom levels and picks points that are ``spotty'' at some zoom.
-  Zooming in or out doesn't change what it picks.
-\item \textbf{Rotation-invariant.} Each descriptor is rotated so its
-  dominant gradient points ``up'' before we measure it. So a rotated
-  feature still looks the same.
-\item \textbf{Illumination-tolerant.} The descriptor is normalised,
-  clipped at 0.2, and normalised again. That kills the effect of
-  overall brightness or contrast changes --- which matters when
-  leaves cast moving shadows.
+\item \textbf{maxCorners = 1500} --- plenty for the cluster stage.
+\item \textbf{qualityLevel = 0.005} --- permissive so weak corners on
+  textureless surfaces (squirrel fur, frog limbs) still get picked.
+\item \textbf{minDistance = 5\,px} --- spatial spread.
+\item \textbf{blockSize = 7} --- size of the neighbourhood used to
+  compute the covariance matrix.
 \end{itemize}
 
-The PDF literally recommends ``sparse local features + robust
-matching''. SIFT is the textbook
-answer,\footnote{D.~G.~Lowe. \emph{Distinctive image features from
-scale-invariant keypoints.} International Journal of Computer
-Vision, 60(2):91--110, 2004. The original paper introducing SIFT
-and the ratio test we use in Step~2.} and OpenCV's own
-feature-matching tutorial uses exactly this
-recipe.\footnote{OpenCV, \emph{Feature Matching} (4.x tutorial),
-\url{https://docs.opencv.org/4.x/dc/dc3/tutorial_py_matcher.html}.
-The tutorial we followed for the SIFT + BFMatcher + Lowe ratio
-pipeline.}
+\subsection{Step 2 --- Tracking with Lucas--Kanade}
 
-We cap at 1500 keypoints per frame. More than that just wastes time
-(the strongest extrema already dominate); fewer than that and small
-objects like the squirrel lose coverage.
+For every consecutive frame pair $(f-1, f)$ we propagate the
+surviving track positions with
+\texttt{cv::calcOpticalFlowPyrLK}\footnote{Docs:
+\url{https://docs.opencv.org/4.x/dc/d6b/group__video__track.html\#ga473e4b886d0bcc6b65831eb88ed93323}.
+Tutorial:
+\url{https://docs.opencv.org/4.x/d4/dee/tutorial_optical_flow.html}.
+The pyramidal LK algorithm comes from Bouguet, \emph{Pyramidal
+Implementation of the Lucas Kanade Feature Tracker}, Intel, 2000.}.
+Lucas--Kanade assumes that within a small neighbourhood the
+brightness is approximately constant under a single 2D translation
+$(u, v)$, and solves for $(u, v)$ from the spatial and temporal
+gradients in that window. The pyramidal version repeats the solve at
+several down-sampled resolutions so it can handle larger motions
+than a single pixel-level pass would.
 
-\subsection{Step 2 --- Matching: finding the same point later}
+We use a $21\!\times\!21$ window and $3$ pyramid levels --- the
+defaults from the OpenCV tutorial, which is enough for the
+inter-frame motion in this dataset.
 
-For every frame $f > 0$, we compare each descriptor from frame 0 to
-every descriptor from frame $f$. For each descriptor in frame 0, we
-ask for the \textbf{two} closest descriptors in frame $f$ (using
-plain Euclidean distance, i.e.\ \texttt{cv::BFMatcher(NORM\_L2)} with
-\texttt{knnMatch(k=2)}).\footnote{API:
-\url{https://docs.opencv.org/4.x/d3/da1/classcv_1_1BFMatcher.html}.
-\texttt{NORM\_L2} is the right norm for SIFT's float descriptors;
-ORB and AKAZE use Hamming.}
-
-Then we apply \textbf{Lowe's ratio test}. This is a one-line rule:
-
-\[
-\boxed{\;\text{keep the match only if}\quad d_1 < 0.75 \cdot d_2\;}
-\]
-
-where $d_1$ is the distance to the \emph{best} neighbour and $d_2$
-to the \emph{second-best}. In English: ``only trust a match if the
-best candidate is clearly better than the second-best.''
-
-Why? Because on repetitive textures --- parallel fence wires, leaves,
-fur tufts --- the best and second-best look almost identical, so the
-``best'' match is basically random. Lowe's test throws exactly those
-out. It's the standard classroom recipe (Lowe, 2004) and the exact
-snippet the OpenCV docs show in their matcher
-tutorial.\footnote{See the snippet ``Apply ratio test'' at
-\url{https://docs.opencv.org/4.x/dc/dc3/tutorial_py_matcher.html}
---- our C++ code is a line-for-line translation of it.}
-
-\paragraph{Why 0.75 specifically?} It's Lowe's original number. We
-also tried it at 0.70 and 0.80 on our data to see:
-
-\begin{table}[H]\centering\small
-\begin{tabular}{lccl}
-\toprule
-Lowe ratio & mIoU & acc@0.5 & what happened \\
-\midrule
-0.70 & 0.44 & 0.40 (2/5) & too strict; bird and frog starve for matches \\
-\textbf{0.75} & \textbf{0.52} & \textbf{0.60 (3/5)} & just right (and the classical value) \\
-0.80 & 0.46 & 0.40 (2/5) & too loose; noise leaks in \\
-\bottomrule
-\end{tabular}
-\end{table}
+\paragraph{Forward--backward consistency.} A track that drifts onto
+the background, or onto an occluding edge, is a silent failure: the
+LK solver returns \emph{some} answer but it's wrong. The standard
+filter is to run the flow \emph{backwards} from frame $f$ to
+frame $f-1$ starting from the predicted positions, and discard any
+track whose round-trip drift exceeds $1.5$\,px. This single check
+removes most of the bad tracks and is the same forward--backward
+test used in \texttt{cv::TrackerMedianFlow} and Kalal et~al.'s
+``forward-backward error'' paper.\footnote{Z.~Kalal, K.~Mikolajczyk,
+J.~Matas. \emph{Forward-Backward Error: Automatic Detection of
+Tracking Failures.} ICPR 2010.}
 
 \subsection{Step 3 --- Getting rid of the camera's drift}
 
@@ -297,8 +287,8 @@ the hardest, ends up being our \emph{best} result (IoU 0.78).
 After steps 1--3 each frame-0 keypoint has two numbers:
 
 \begin{itemize}\itemsep2pt
-\item $n_i$: how many frames actually gave us a successful,
-  Lowe-passing match for this point.
+\item $n_i$: how many frames the track survived (forward--backward
+  consistent flow).
 \item $r_i$: the total of $\|\tilde \delta_i^{(f)}\|$ across those
   frames --- total ``leftover'' motion after removing camera drift.
 \end{itemize}
@@ -365,7 +355,7 @@ the moving object. Three annoying things happen in practice:
 \item Big objects (like the sheep) split into several separate
   clusters --- one on the head, one on the body --- because the
   texture is patchy.
-\item SIFT keypoints tend to sit on the \emph{texture inside} the
+\item Tracked corners sit on the high-gradient \emph{interior} of an
   object, not on its silhouette. So a tight box around them is
   usually a bit smaller than the real object.
 \end{enumerate}
@@ -493,7 +483,7 @@ what we report.}
 File & Owner & What it does \\
 \midrule
 \texttt{include/dod.hpp}           & Riccardo Pesce    & the shared data struct + function list everyone imports \\
-\texttt{src/feature\_tracker.cpp}  & Mahdi Gheysari    & SIFT, matching, Lowe, median-flow \\
+\texttt{src/feature\_tracker.cpp}  & Mahdi Gheysari    & Shi--Tomasi corners, Lucas--Kanade tracking, median-flow \\
 \texttt{src/motion\_segmenter.cpp} & Filippo Businaro  & picking the moving points \\
 \texttt{src/bbox\_estimator.cpp}   & Riccardo Pesce    & clustering, MAD, box, cluster-level diagnostic \\
 \texttt{src/silhouette\_refiner.cpp} & Filippo Businaro  & phase-correlation warp + absdiff shrink \\
@@ -510,28 +500,28 @@ lives in \texttt{dod.hpp}.}
 \subsection{The shared struct}
 
 Every module talks through one data structure, \texttt{TrackedPoint}.
-It started life as a KLT-tracker struct; after we rewrote to SIFT we
-kept the same fields but repurposed a couple of them. The comments
-below say what each field \emph{actually} holds now.
+It carries everything we know about one tracked point: where it
+started, its trajectory, how many frames it survived, and the total
+residual displacement after camera correction.
 
 \begin{lstlisting}[caption={\texttt{include/dod.hpp} (Riccardo Pesce).}]
 namespace dod {
 struct TrackedPoint {
-    cv::Point2f first;                    // where this point sits on frame 0
-    cv::Point2f last;                     // last frame where we matched it
-    std::vector<cv::Point2f> trajectory;  // its positions over time
-    int   inlier_count  = 0;              // now: count of successful matches
-    int   outlier_count = 0;              // now: 1 if flagged as "dynamic"
-    float residual      = 0.f;            // now: total leftover displacement
+    cv::Point2f first;                    // position on frame 0
+    cv::Point2f last;                     // last surviving position
+    std::vector<cv::Point2f> trajectory;  // positions over time
+    int   n_matches  = 0;                 // # frames the track survived
+    float total_disp = 0.f;               // sum of ||p_f - p_0 - cam_f||
 };
 
-// Everything below is declared here and implemented in its own .cpp.
+// Declarations; each implemented in its own .cpp.
 std::vector<std::string> listFrames(const std::string&);
 void trackFeatures(const std::vector<cv::Mat>&, std::vector<TrackedPoint>&);
-std::vector<int> classifyDynamicTracks(const std::vector<cv::Mat>&,
-                                       std::vector<TrackedPoint>&, double);
+std::vector<int> classifyDynamicTracks(const std::vector<TrackedPoint>&);
 cv::Rect estimateBBox(const std::vector<TrackedPoint>&,
                       const std::vector<int>&, const cv::Size&);
+cv::Rect refineBBoxSilhouette(const std::vector<cv::Mat>&,
+                              const cv::Rect&, const cv::Size&);
 cv::Rect readGT(const std::string&);
 double   iou(const cv::Rect&, const cv::Rect&);
 void     writePrediction(const std::string&, const cv::Rect&);
@@ -541,53 +531,69 @@ void     writePrediction(const std::string&, const cv::Rect&);
 \subsection{\texttt{feature\_tracker.cpp} (Mahdi)}
 
 This is the biggest file --- it does steps 1--3 of the pipeline.
-The loop below is the heart of it: SIFT on a new frame, match
-against frame 0, apply Lowe, kill the camera drift, accumulate.
+The loop below is the heart of it: detect corners once, propagate
+them with Lucas--Kanade, run a forward--backward consistency check,
+subtract camera drift, accumulate.
 
 \begin{lstlisting}[caption={The main loop inside \texttt{trackFeatures}.}]
-auto sift = cv::SIFT::create(1500);
-std::vector<cv::KeyPoint> kp0; cv::Mat desc0;
-sift->detectAndCompute(frames_gray[0], cv::noArray(), kp0, desc0);
-// tracks[i] is initialised from kp0[i]
+// Detect Shi-Tomasi corners on frame 0 only.
+std::vector<cv::Point2f> p0;
+cv::goodFeaturesToTrack(frames_gray[0], p0, /*maxCorners=*/1500,
+                        /*qualityLevel=*/0.005, /*minDistance=*/5,
+                        cv::noArray(), /*blockSize=*/7);
+// tracks[i] is initialised from p0[i]
 
-cv::BFMatcher matcher(cv::NORM_L2, /*crossCheck=*/false);
+// Lists of currently-alive track indices and their last positions.
+std::vector<int>         alive(tracks.size());
+std::vector<cv::Point2f> prev_pts = p0;
+std::iota(alive.begin(), alive.end(), 0);
+
 for (size_t f = 1; f < frames_gray.size(); ++f) {
-    std::vector<cv::KeyPoint> kpF; cv::Mat descF;
-    sift->detectAndCompute(frames_gray[f], cv::noArray(), kpF, descF);
+    std::vector<cv::Point2f> next_pts, back_pts;
+    std::vector<uchar> ok_fwd, ok_bwd;
+    std::vector<float> err_fwd, err_bwd;
 
-    std::vector<std::vector<cv::DMatch>> knn;
-    matcher.knnMatch(desc0, descF, knn, 2);
+    // Forward flow: where did each prev_pt move to in frame f?
+    cv::calcOpticalFlowPyrLK(frames_gray[f-1], frames_gray[f],
+                             prev_pts, next_pts, ok_fwd, err_fwd,
+                             /*winSize=*/{21,21}, /*maxLevel=*/3);
+    // Backward flow: from those new positions, where do we land in f-1?
+    cv::calcOpticalFlowPyrLK(frames_gray[f], frames_gray[f-1],
+                             next_pts, back_pts, ok_bwd, err_bwd,
+                             {21,21}, 3);
 
-    // Lowe's ratio test: keep only unambiguous matches.
-    struct Mtch { int i; cv::Point2f p_new, disp; };
-    std::vector<Mtch> ok;
-    for (const auto& pair : knn) {
-        if (pair.size() < 2) continue;
-        if (pair[0].distance >= 0.75f * pair[1].distance) continue;
-        cv::Point2f p_new = kpF[pair[0].trainIdx].pt;
-        ok.push_back({pair[0].queryIdx, p_new,
-                      p_new - tracks[pair[0].queryIdx].first});
+    // Keep only tracks whose round-trip drift is small.
+    std::vector<int>         new_alive;
+    std::vector<cv::Point2f> new_prev, frame_disp;
+    for (size_t a = 0; a < alive.size(); ++a) {
+        if (!ok_fwd[a] || !ok_bwd[a]) continue;
+        if (cv::norm(back_pts[a] - prev_pts[a]) > 1.5f) continue;
+        int ti = alive[a];
+        new_alive.push_back(ti);
+        new_prev.push_back(next_pts[a]);
+        frame_disp.push_back(next_pts[a] - tracks[ti].first);
+        tracks[ti].last = next_pts[a];
+        tracks[ti].trajectory.push_back(next_pts[a]);
     }
 
-    // Camera drift = median displacement across all matched points.
-    // (nth_element over xs, ys to find the medians.)
-    cv::Point2f med(xs[xs.size()/2], ys[ys.size()/2]);
-
-    // Accumulate leftover motion per point.
-    for (const auto& m : ok) {
-        cv::Point2f rel = m.disp - med;
-        tracks[m.i].residual      += cv::norm(rel);
-        tracks[m.i].inlier_count  += 1;
-        tracks[m.i].last           = m.p_new;
-        tracks[m.i].trajectory.push_back(m.p_new);
+    // Per-frame median = camera; subtract it from each survivor.
+    cv::Point2f cam = medianXY(frame_disp);
+    for (size_t k = 0; k < new_alive.size(); ++k) {
+        cv::Point2f rel = frame_disp[k] - cam;
+        tracks[new_alive[k]].total_disp += cv::norm(rel);
+        tracks[new_alive[k]].n_matches++;
     }
+
+    alive    = std::move(new_alive);
+    prev_pts = std::move(new_prev);
 }
 \end{lstlisting}
 
-Two things worth noticing: (a) matching is always frame 0 against
-frame $f$ --- we never chain matches, so drift doesn't accumulate;
-(b) the median displacement is computed \emph{per frame}, because
-the camera pan might not be the same in every frame.
+Two things worth noticing: (a) Shi--Tomasi runs only on frame~0 ---
+we never re-detect, so a track's identity is stable for its whole
+life; (b) the median displacement is computed \emph{per frame}
+relative to frame~0, because the camera pan may differ between
+frames.
 
 \subsection{\texttt{motion\_segmenter.cpp} (Filippo)}
 
@@ -681,13 +687,13 @@ and \texttt{summary.txt}.
 \toprule
 category & GT box (w$\times$h) & predicted (w$\times$h) & IoU & TP@0.5 \\
 \midrule
-bird     & $283\times255$ & $331\times244$ & 0.516 & yes \\
-car      & $68\times42$   & $72\times 38$  & 0.687 & yes \\
-frog     & $133\times 98$ & $ 98\times111$ & 0.584 & yes \\
-sheep    & $321\times179$ & $341\times181$ & 0.680 & yes \\
-squirrel & $23\times31$   & $ 36\times 63$ & 0.314 & no  \\
+bird     & $283\times255$ & $258\times277$ & 0.631 & yes \\
+car      & $68\times42$   & $90\times 42$  & 0.638 & yes \\
+frog     & $133\times 98$ & $ 64\times 60$ & 0.282 & no  \\
+sheep    & $321\times179$ & $332\times145$ & 0.673 & yes \\
+squirrel & $23\times31$   & $ 28\times 37$ & 0.616 & yes \\
 \midrule
-\multicolumn{3}{r}{\textbf{mIoU}}         & \textbf{0.556} & \\
+\multicolumn{3}{r}{\textbf{mIoU}}         & \textbf{0.568} & \\
 \multicolumn{3}{r}{\textbf{accuracy@0.5}} & \textbf{0.80 (4/5)} & \\
 \bottomrule
 \end{tabular}
@@ -700,14 +706,9 @@ threshold.}
 \end{figure}
 
 \paragraph{Visuals.} Green = ground truth, red = our prediction
-(the single box actually written to the output file), thin yellow
-boxes = every individual motion cluster discovered in Step 5, orange
-dots = all SIFT keypoints on frame 0, green lines = trajectories of
-the points we classified as dynamic. The yellow boxes are diagnostic
-only --- the project brief requires a single bbox per sequence, and
-the red box is the merged version. The yellow view makes it visible
-when the system finds separate moving sub-objects (e.g.\ multiple
-sheep) versus real false positives on background motion.
+(the single box actually written to the output file), orange dots =
+all Shi--Tomasi corners detected on frame~0, green lines =
+trajectories of the corners we classified as dynamic.
 
 \begin{figure}[H]
 \centering
@@ -728,46 +729,49 @@ here.}
 
 \section{Where it breaks and why}
 
-\paragraph{Squirrel (IoU 0.31).} The squirrel is tiny
-($23\times31$\,px in a $259\times327$ image --- less than 1\% of the
-picture). SIFT hardly finds any stable extrema on its fur; only
-about 13 points end up tagged dynamic. Step 6 shrinks our box from
-roughly $76\times52$ down to $36\times63$, pulling the IoU from 0.16
-to 0.31, but the object is simply below the resolution at which we
-can segment it reliably from feature + absdiff cues. The professor
-mentions a second, smaller squirrel in the upper-left of the scene
-as an optional detection; our pipeline does \emph{not} recover it
-(SIFT finds essentially nothing on it, and the few weak matches it
-produces fall below our $\max(8, 4m)$ displacement floor), and the
-brief says detecting only the main squirrel is sufficient.
+\paragraph{Squirrel (IoU 0.62) --- the SIFT-vs-LK win.}
+This is the case that motivated the switch. With SIFT we got IoU
+$0.31$ (sub-threshold): SIFT scale-invariant extrema basically
+refused to anchor on the squirrel's fur. Shi--Tomasi corners are
+much less picky --- they fire wherever the local gradient is strong
+in two directions --- and Lucas--Kanade tracks them happily across
+the small inter-frame motion. We end up with only $5$ dynamic
+tracks, but they sit exactly on the squirrel and produce a clean
+true positive. The smaller second squirrel in the upper-left
+(optional per the brief) is still not recovered: its motion sits
+below the $\max(8, 4m)$\,px floor we use to ignore leaf and grass
+motion, and the brief says detecting only the main squirrel is
+sufficient.
 
-\paragraph{Frog (IoU 0.58, down from 0.75 without Step 6).} The
-frog's body is very smoothly textured, so the pixel-level absdiff
-mask fires on the limbs and skips the belly. Step 6 accepts the
-shrink because it crosses our area threshold, and the IoU drops
-slightly but still clears $0.5$ (true positive). This is the only
-sequence where refinement costs us anything, and in exchange it wins
-back sheep (IoU $0.36 \to 0.68$) and squirrel (IoU $0.16 \to 0.31$).
+\paragraph{Frog (IoU 0.28) --- the SIFT-vs-LK regression.}
+This is the case the optical-flow rewrite cost us. The frog's back
+is smoothly textured: low gradient, very few Shi--Tomasi corners.
+The corners we do place sit on the limbs and a couple of skin
+folds; their bounding rectangle is tighter than the full GT box.
+With SIFT we got IoU $0.58$ here because scale-space extrema picked
+up a handful of stable points across the body that LK corners do
+not see. Possible mitigations we did not pursue: lower the
+\texttt{qualityLevel} for Shi--Tomasi to seed weaker corners on the
+body, or grow the cluster bounding box proportionally to the
+spread of dynamic corners. We chose to accept the frog regression
+because the squirrel recovery is more valuable: with SIFT we had
+$0/1$ on small/textureless objects; with LK we have $1/1$ on the
+harder of the two.
 
-\paragraph{Sheep (IoU 0.68).} Three sheep, one of which is almost
-static. Before Step 6, the feature-based cluster box was too wide
-because a few background matches at the far side of the scene crept
-in; the refined motion mask cuts through that cleanly. The
-displacement floor was also raised from $\max(6,3m)$ to $\max(8,4m)$
-after the professor's clarification that the nearly-static sheep
-must \emph{not} be treated as foreground unless it is clearly
-moving. In practice the static sheep's keypoints now sit below the
-floor and are excluded from the cluster.
+\paragraph{Sheep (IoU 0.67).} Three sheep, one of which is almost
+static. The displacement floor $\max(8, 4m)$\,px keeps the
+nearly-static sheep below the threshold, so it is correctly
+excluded from the foreground per the brief.
 
 \paragraph{What we could do (still no deep learning).}
 \begin{itemize}\itemsep2pt
-\item Run SIFT at a larger resolution so we find more keypoints on
-  small fuzzy things like the small second squirrel.
-\item Use the SIFT scale $\sigma$ to grow the bounding box
-  proportionally to each keypoint's detection scale.
-\item Replace Otsu by a learned per-sequence threshold on the motion
-  mask, or fit a small GMM on the absdiff histogram, to recover the
-  frog interior without hurting sheep.
+\item Lower Shi--Tomasi \texttt{qualityLevel} adaptively per
+  sequence to seed more corners on textureless surfaces (the frog).
+\item Fall back to dense Farneback flow inside the coarse cluster
+  to expand the box to cover the full silhouette.
+\item Run both Shi--Tomasi+LK and SIFT and merge the dynamic-track
+  sets; an early experiment showed mIoU $0.58$ that way but at
+  $\sim 17\times$ the runtime, which we judged not worth it.
 \end{itemize}
 
 \section{How to run it}
