@@ -1,3 +1,4 @@
+// Author: Filippo Businaro
 // try to make the box smaller using pixel difference between frames.
 // only take the new box if it is much smaller than the old one.
 

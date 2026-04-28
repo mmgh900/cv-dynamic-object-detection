@@ -1,3 +1,4 @@
+// Author: Mahdi Gheysari
 // find corners on frame 0 and follow them with optical flow.
 
 #include "dod.hpp"

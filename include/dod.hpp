@@ -1,4 +1,7 @@
-#pragma once
+// Author: Riccardo Pesce
+#ifndef DOD_HPP
+#define DOD_HPP
+
 #include <opencv2/opencv.hpp>
 #include <string>
 #include <vector>
@@ -35,3 +38,5 @@ double   iou(const cv::Rect& a, const cv::Rect& b);
 void     writePrediction(const std::string& path, const cv::Rect& box);
 
 } // namespace dod
+
+#endif // DOD_HPP

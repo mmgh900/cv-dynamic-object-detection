@@ -1,3 +1,4 @@
+// Author: Filippo Businaro
 // read GT box and compute IoU.
 
 #include "dod.hpp"

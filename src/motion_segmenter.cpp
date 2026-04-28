@@ -1,3 +1,4 @@
+// Author: Filippo Businaro
 // pick the points that really move (not just camera).
 
 #include "dod.hpp"

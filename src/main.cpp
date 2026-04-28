@@ -1,3 +1,4 @@
+// Author: Mahdi Gheysari
 // run the pipeline on each category and save the outputs.
 
 #include "dod.hpp"

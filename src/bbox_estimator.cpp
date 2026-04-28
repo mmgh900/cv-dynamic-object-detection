@@ -1,3 +1,4 @@
+// Author: Riccardo Pesce
 // group the moving points, find the biggest group, draw a box.
 
 #include "dod.hpp"
