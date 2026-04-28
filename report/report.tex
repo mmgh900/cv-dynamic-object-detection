@@ -184,6 +184,16 @@ sides too, the cluster covers the whole body, and the box reaches
 IoU $0.53$. This is the fix Riccardo suggested when he saw the
 failure.
 
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{figures/frog_clahe.png}
+\caption{Frog frame 0 before and after CLAHE. The histograms
+show the equaliser spreading the dark pixels into a wider range,
+and the dot overlays show $170$ Shi--Tomasi corners on the raw
+image vs.\ $245$ on the equalised one. The new corners land on
+the body, exactly where they were missing.}
+\end{figure}
+
 \paragraph{What we could still try.} Grow the cluster bounding box
 by the spread of dynamic corners (so a tight cluster would still
 expand to a plausible object size), or detect new corners
