@@ -26,38 +26,22 @@
   \end{@twocolumnfalse}
 ]
 
-\section{Our approach}
-
-The project asks us to find one moving object in a short sequence
-of images and draw a box around it on the first frame. The brief
-suggests using sparse local features and either feature matching or
-optical flow, so we follow that path.
+\section{Method}
 
 We watched the videos before writing any code. In four of the five
-sequences (bird, frog, sheep, squirrel) the camera does not move at
-all. In the car sequence the camera does a small pan from left to
-right. So the trick is simple: if we follow some points across the
-frames, the points on the background stay still (or all move
-together with the camera) and the points on the object move
-differently. We just need to spot which points are different.
+sequences (bird, frog, sheep, squirrel) the camera does not move,
+in the car sequence it does a small left-to-right pan. So the idea
+is simple: follow some points across the frames, the points on the
+background stay still (or all move together with the camera) and
+the points on the object move differently. We just need to spot
+which points are different.
 
-\paragraph{What we tried first.} We started with SIFT features and
-matched them between frame 0 and every later frame using Lowe's
-ratio test. It worked for the car and the sheep, but it failed
-badly on the squirrel: the squirrel is very small and its fur does
-not give SIFT enough stable points, so we got an IoU of $0.31$
-which is below the threshold. We switched to optical flow because
-the brief allows it and because optical flow does not need a
-``perfect'' point, just a corner that the tracker can follow.
-
-\paragraph{What we do now.} The pipeline has six short steps:
+The pipeline has six steps:
 
 \begin{enumerate}\itemsep1pt
 \item Apply local histogram equalisation (CLAHE, clip $0.5$,
-  $8\times8$ tiles) to every frame. This brightens dim, low-contrast
-  regions like the frog's smooth back so the next step can find
-  corners there. The clip limit is small on purpose: we want a
-  gentle lift, not amplified noise on already-good areas.
+  $8\times8$ tiles) to every frame, so the next step can find
+  corners on dim or smooth surfaces.
 \item Find good corners on the equalised first frame
   (\texttt{cv::goodFeaturesToTrack}).
 \item Follow each corner from frame to frame using pyramidal
@@ -66,21 +50,23 @@ the brief allows it and because optical flow does not need a
   backwards as a sanity check and drop any track that does not
   return to where it started.
 \item For each frame, take the median displacement of all the
-  surviving tracks and call it the camera. Subtract it. What is
-  left is real object motion.
-\item For each track we get an average leftover motion. We sort the
-  tracks and keep the top $15\%$, but only if their motion is
-  bigger than $\max(8\,\text{px}, 4\times\text{median})$. The floor
-  is what removes leaves moving in the wind, walkers in the
-  background, and the nearly-still sheep that the brief tells us to
-  ignore.
+  surviving tracks and call it the camera. Subtract it.
+\item For each track we get an average leftover motion. Keep the
+  top $15\%$ above $\max(8\,\text{px}, 4\times\text{median})$.
 \item Group the surviving points by distance, take the biggest
-  group, throw away points that are too far from the centre, and
-  return a slightly padded bounding box. A small extra step uses
-  pixel differences to shrink the box if it is clearly too big, but
-  it only kicks in when the new box is much smaller than the old
-  one.
+  group, drop points far from the centre, and return a slightly
+  padded bounding box. A small extra step uses pixel differences to
+  shrink the box if it is clearly too big.
 \end{enumerate}
+
+\paragraph{What we tried first.} Our initial version used SIFT
+features matched between frame 0 and every later frame with Lowe's
+ratio test. It worked for the car and the sheep but failed on the
+squirrel (IoU $0.31$, sub-threshold) because SIFT scale-space
+extrema do not anchor on its fur. We replaced the SIFT front-end
+with Shi--Tomasi corners + Lucas--Kanade flow because optical flow
+does not need a stable scale-space extremum, only a corner the
+tracker can follow.
 
 \section{Results}
 
@@ -104,80 +90,36 @@ squirrel & $23\times31$   & $ 28\times 37$ & 0.616 & yes \\
 \caption{Results on the five provided sequences.}
 \end{table}
 
+\paragraph{Bird, car, sheep.} These three objects all have plenty
+of strong corners on them: dark feathers against bright leaves, a
+metal car body, dark sheep legs and a fence. Lucas--Kanade follows
+them across the whole sequence, the moving ones stand out from the
+still background, and the cluster covers most of the object.
 
-\section{Robustness}
+\paragraph{Squirrel.} The squirrel is only about $1\%$ of the
+image, so it is the hardest case. With SIFT we got IoU $0.31$;
+with Shi--Tomasi corners we get only five moving tracks but they
+all sit on the squirrel, so the box is tight and correct (IoU
+$0.62$).
 
-\paragraph{Camera motion.} Four sequences have a still camera, the
-car has a small pan. We do not try to fit a fancy camera model;
-subtracting the median displacement is enough to cancel a constant
-shift, and it is what makes the car case work.
-
-\paragraph{Lighting.} Optical flow is sensitive to brightness
-changes, but the forward--backward check kills tracks where the
-``motion'' is really an illumination artefact. The dappled light on
-leaves in the bird and frog sequences does not leak into the
-moving set.
-
-\paragraph{Occlusion.} If a track gets covered for a few frames the
-flow simply fails for those frames and the track is dropped
-temporarily. We average over the frames that did succeed, so a
-short occlusion does not destroy the score.
-
-\paragraph{Sensitivity.} Two parameters mattered. The corner
-quality level $0.005$ is permissive enough to find corners on
-weakly textured surfaces (like squirrel fur) without flooding the
-background; $0.01$ lost the squirrel and $0.001$ added grass false
-positives on the car. The displacement percentile $15\%$ balanced
-recall and precision: $10\%$ missed pieces of the sheep, $20\%$
-brought in horizon false positives on the car.
-
-\section{Why it works on every sequence}
-
-\paragraph{Bird, car, sheep --- the easy cases.} These three
-objects all have lots of strong corners on them: the bird has dark
-edgy feathers against bright leaves, the car has hard metal lines,
-the sheep has black legs and a fence. Lucas--Kanade follows these
-corners well across the whole sequence, the moving ones stand out
-clearly from the still background, and the cluster covers most of
-the object. Three easy true positives.
-
-\paragraph{Squirrel --- where optical flow saves us.} The squirrel
-is only about $1\%$ of the image, so it is the hardest case. SIFT
-gave up on it (IoU $0.31$, our only failure with SIFT) because
-SIFT wants stable scale-space extrema and the fur does not give
-any. Shi--Tomasi is happier: it just needs a corner with two
-strong gradient directions, and the squirrel's eyes, ears and tree
-contact points give a few of those. We get only five moving
-tracks but they all sit on the squirrel, so the box is tight and
-correct (IoU $0.62$).
-
-\paragraph{Frog --- where CLAHE saves us.} Without CLAHE the frog
-was our only failure (IoU $0.28$). Its body is wet and smooth,
-almost no local gradient, so Shi--Tomasi found barely any corners
-on the body itself --- only on the limbs and the branch next to
-it. The cluster covered the limbs only and the box was too tight.
-After we add CLAHE the dim greenish skin gets a local contrast
-boost, Shi--Tomasi places a handful of corners along the back and
-sides too, the cluster covers the whole body, and the box reaches
-IoU $0.53$. This is the fix Riccardo suggested when he saw the
-failure.
+\paragraph{Frog.} Without CLAHE the frog was our only failure (IoU
+$0.28$). Its body is wet and smooth, almost no local gradient, so
+Shi--Tomasi found corners only on the limbs and the branch next to
+it. After CLAHE the skin gets a local contrast boost,
+Shi--Tomasi places extra corners along the back and sides, and the
+box reaches IoU $0.53$. Figure~\ref{fig:clahe} shows the corner
+counts before and after.
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=\linewidth]{figures/frog_clahe.png}
-\caption{Frog frame 0 before and after CLAHE. The histograms
-show the equaliser spreading the dark pixels into a wider range,
-and the dot overlays show $170$ Shi--Tomasi corners on the raw
-image vs.\ $245$ on the equalised one. The new corners land on
-the body, exactly where they were missing.}
+\caption{Frog frame 0 before and after CLAHE. The histograms show
+the equaliser spreading the dark pixels into a wider range. The
+dot overlays show $170$ Shi--Tomasi corners on the raw image
+vs.\ $245$ on the equalised one; the new corners land on the
+body where they were missing.}
+\label{fig:clahe}
 \end{figure}
-
-\paragraph{What we could still try.} Grow the cluster bounding box
-by the spread of dynamic corners (so a tight cluster would still
-expand to a plausible object size), or detect new corners
-periodically instead of only on frame 0. Both are nice-to-haves
-now that all five sequences are true positives.
-
 
 \section{Code and credit}
 
