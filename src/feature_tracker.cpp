@@ -15,6 +15,8 @@ constexpr int    kBlockSize       = 7;
 constexpr int    kPyrWinSize      = 21;
 constexpr int    kPyrMaxLevel     = 3;
 constexpr float  kForwardBackErr  = 1.5f;
+constexpr double kClaheClipLimit  = 0.5;
+constexpr int    kClaheTile       = 8;
 }
 
 std::vector<std::string> listFrames(const std::string& folder) {
@@ -41,10 +43,23 @@ static cv::Point2f medianXY(std::vector<cv::Point2f> v) {
     return {mx, my};
 }
 
-void trackFeatures(const std::vector<cv::Mat>& frames,
+void trackFeatures(const std::vector<cv::Mat>& frames_in,
                    std::vector<TrackedPoint>& tracks) {
     tracks.clear();
-    if (frames.size() < 2) return;
+    if (frames_in.size() < 2) return;
+
+    // CLAHE makes dim, low-contrast scenes (like the frog) brighter
+    // in a local way, so Shi-Tomasi can find more corners on smooth
+    // skin. We do it per-frame so LK still tracks consistently.
+    auto clahe = cv::createCLAHE(kClaheClipLimit,
+                                 {kClaheTile, kClaheTile});
+    std::vector<cv::Mat> frames;
+    frames.reserve(frames_in.size());
+    for (const auto& g : frames_in) {
+        cv::Mat eq;
+        clahe->apply(g, eq);
+        frames.push_back(eq);
+    }
 
     // get good corners only on first frame.
     std::vector<cv::Point2f> p0;

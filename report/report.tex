@@ -1,7 +1,8 @@
-\documentclass[10pt,a4paper]{article}
-\usepackage[margin=1.8cm]{geometry}
+\documentclass[10pt,a4paper,twocolumn]{article}
+\usepackage[margin=1.5cm]{geometry}
 \setlength{\parskip}{2pt}
 \setlength{\parindent}{0pt}
+\setlength{\columnsep}{0.7cm}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{subcaption}
@@ -10,6 +11,7 @@
 \usepackage{hyperref}
 \usepackage{xcolor}
 \usepackage{float}
+\usepackage{dblfloatfix}
 
 \title{\vspace{-2em}Feature Tracking and Dynamic Object Detection \\
 \large Computer Vision -- Mid-course Project}
@@ -17,13 +19,17 @@
 \date{April 2026}
 
 \begin{document}
-\maketitle
-\vspace{-2.5em}
+\twocolumn[
+  \begin{@twocolumnfalse}
+    \maketitle
+    \vspace{-2em}
+  \end{@twocolumnfalse}
+]
 
 \section{Our approach}
 
-The project asks us to find one moving object in a short sequence of
-images and draw a box around it on the first frame. The brief
+The project asks us to find one moving object in a short sequence
+of images and draw a box around it on the first frame. The brief
 suggests using sparse local features and either feature matching or
 optical flow, so we follow that path.
 
@@ -44,20 +50,26 @@ which is below the threshold. We switched to optical flow because
 the brief allows it and because optical flow does not need a
 ``perfect'' point, just a corner that the tracker can follow.
 
-\paragraph{What we do now.} The pipeline has five short steps:
+\paragraph{What we do now.} The pipeline has six short steps:
 
 \begin{enumerate}\itemsep1pt
-\item Find good corners on the first frame
+\item Apply local histogram equalisation (CLAHE, clip $0.5$,
+  $8\times8$ tiles) to every frame. This brightens dim, low-contrast
+  regions like the frog's smooth back so the next step can find
+  corners there. The clip limit is small on purpose: we want a
+  gentle lift, not amplified noise on already-good areas.
+\item Find good corners on the equalised first frame
   (\texttt{cv::goodFeaturesToTrack}).
 \item Follow each corner from frame to frame using pyramidal
-  Lucas--Kanade optical flow (\texttt{cv::calcOpticalFlowPyrLK}). We
-  also run the flow backwards as a sanity check and drop any track
-  that does not return to where it started.
+  Lucas--Kanade optical flow
+  (\texttt{cv::cal\-cOpticalFlowPyrLK}). We also run the flow
+  backwards as a sanity check and drop any track that does not
+  return to where it started.
 \item For each frame, take the median displacement of all the
   surviving tracks and call it the camera. Subtract it. What is
   left is real object motion.
-\item For each track we get an average leftover motion. We sort
-  the tracks and keep the top $15\%$, but only if their motion is
+\item For each track we get an average leftover motion. We sort the
+  tracks and keep the top $15\%$, but only if their motion is
   bigger than $\max(8\,\text{px}, 4\times\text{median})$. The floor
   is what removes leaves moving in the wind, walkers in the
   background, and the nearly-still sheep that the brief tells us to
@@ -66,41 +78,54 @@ the brief allows it and because optical flow does not need a
   group, throw away points that are too far from the centre, and
   return a slightly padded bounding box. A small extra step uses
   pixel differences to shrink the box if it is clearly too big, but
-  it only kicks in when the new box is much smaller than the old one.
+  it only kicks in when the new box is much smaller than the old
+  one.
 \end{enumerate}
 
 \section{Results}
 
 \begin{table}[H]
 \centering\small
+\setlength{\tabcolsep}{4pt}
 \begin{tabular}{lcccc}
 \toprule
-category & GT box (w$\times$h) & predicted box & IoU & TP@0.5 \\
+category & GT (w$\times$h) & ours & IoU & TP@0.5 \\
 \midrule
-bird     & $283\times255$ & $258\times277$ & 0.631 & yes \\
-car      & $68\times42$   & $90\times 42$  & 0.638 & yes \\
-frog     & $133\times 98$ & $ 64\times 60$ & 0.282 & no  \\
-sheep    & $321\times179$ & $332\times145$ & 0.673 & yes \\
+bird     & $283\times255$ & $249\times241$ & 0.578 & yes \\
+car      & $68\times42$   & $75\times 48$  & 0.773 & yes \\
+frog     & $133\times 98$ & $ 98\times 83$ & 0.532 & yes \\
+sheep    & $321\times179$ & $333\times195$ & 0.796 & yes \\
 squirrel & $23\times31$   & $ 28\times 37$ & 0.616 & yes \\
 \midrule
-\multicolumn{3}{r}{\textbf{mIoU}}         & \textbf{0.568} & \\
-\multicolumn{3}{r}{\textbf{accuracy@0.5}} & \textbf{0.80 (4/5)} & \\
+\multicolumn{3}{r}{\textbf{mIoU}}         & \textbf{0.659} & \\
+\multicolumn{3}{r}{\textbf{accuracy@0.5}} & \multicolumn{2}{l}{\textbf{1.00 (5/5)}}\\
 \bottomrule
 \end{tabular}
 \caption{Results on the five provided sequences.}
 \end{table}
 
-\begin{figure}[H]
+\begin{figure*}[!b]
 \centering
-\begin{subfigure}{.195\linewidth}\centering\includegraphics[height=2.6cm,keepaspectratio]{figures/bird_overlay.png}\caption*{\scriptsize bird}\end{subfigure}\hfill
-\begin{subfigure}{.195\linewidth}\centering\includegraphics[height=2.6cm,keepaspectratio]{figures/car_overlay.png}\caption*{\scriptsize car}\end{subfigure}\hfill
-\begin{subfigure}{.195\linewidth}\centering\includegraphics[height=2.6cm,keepaspectratio]{figures/frog_overlay.png}\caption*{\scriptsize frog}\end{subfigure}\hfill
-\begin{subfigure}{.195\linewidth}\centering\includegraphics[height=2.6cm,keepaspectratio]{figures/sheep_overlay.png}\caption*{\scriptsize sheep}\end{subfigure}\hfill
-\begin{subfigure}{.195\linewidth}\centering\includegraphics[height=2.6cm,keepaspectratio]{figures/squirrel_overlay.png}\caption*{\scriptsize squirrel}\end{subfigure}
+\begin{subfigure}{.195\textwidth}\centering
+  \includegraphics[height=3.2cm,keepaspectratio]{figures/bird_overlay.png}\\\scriptsize bird
+\end{subfigure}\hfill
+\begin{subfigure}{.195\textwidth}\centering
+  \includegraphics[height=3.2cm,keepaspectratio]{figures/car_overlay.png}\\\scriptsize car
+\end{subfigure}\hfill
+\begin{subfigure}{.195\textwidth}\centering
+  \includegraphics[height=3.2cm,keepaspectratio]{figures/frog_overlay.png}\\\scriptsize frog
+\end{subfigure}\hfill
+\begin{subfigure}{.195\textwidth}\centering
+  \includegraphics[height=3.2cm,keepaspectratio]{figures/sheep_overlay.png}\\\scriptsize sheep
+\end{subfigure}\hfill
+\begin{subfigure}{.195\textwidth}\centering
+  \includegraphics[height=3.2cm,keepaspectratio]{figures/squirrel_overlay.png}\\\scriptsize squirrel
+\end{subfigure}
 \caption{First frame of each sequence. Green = ground truth box,
-red = our prediction, orange dots = corners we detected on frame 0,
-green lines = trajectories of the corners we classified as moving.}
-\end{figure}
+red = our prediction, orange dots = corners we detected on frame
+0, green lines = trajectories of the corners we classified as
+moving.}
+\end{figure*}
 
 \section{Robustness}
 
@@ -111,8 +136,8 @@ shift, and it is what makes the car case work.
 
 \paragraph{Lighting.} Optical flow is sensitive to brightness
 changes, but the forward--backward check kills tracks where the
-``motion'' is really an illumination artefact. The dappled light
-on leaves in the bird and frog sequences does not leak into the
+``motion'' is really an illumination artefact. The dappled light on
+leaves in the bird and frog sequences does not leak into the
 moving set.
 
 \paragraph{Occlusion.} If a track gets covered for a few frames the
@@ -120,43 +145,77 @@ flow simply fails for those frames and the track is dropped
 temporarily. We average over the frames that did succeed, so a
 short occlusion does not destroy the score.
 
-\paragraph{Small or smooth objects.} The squirrel is tiny (about
-$1\%$ of the image) and the optical-flow approach is exactly what
-saves it: we get only $5$ moving tracks but they all sit on the
-squirrel and the box is correct (IoU $0.62$). The frog is the
-opposite story: its body is very smooth so we find very few corners
-on it, the moving tracks all land on the limbs, and the box ends up
-too tight (IoU $0.28$, our only failure). With SIFT this case
-worked because the scale-space extrema picked up a few stable
-points across the body; we lost it when we switched to corner-based
-tracking, but we judged the squirrel recovery to be more valuable.
-
 \paragraph{Sensitivity.} Two parameters mattered. The corner
 quality level $0.005$ is permissive enough to find corners on
-weakly textured surfaces (squirrel fur) without flooding the
+weakly textured surfaces (like squirrel fur) without flooding the
 background; $0.01$ lost the squirrel and $0.001$ added grass false
 positives on the car. The displacement percentile $15\%$ balanced
 recall and precision: $10\%$ missed pieces of the sheep, $20\%$
 brought in horizon false positives on the car.
 
+\section{Why it works on every sequence}
+
+\paragraph{Bird, car, sheep --- the easy cases.} These three
+objects all have lots of strong corners on them: the bird has dark
+edgy feathers against bright leaves, the car has hard metal lines,
+the sheep has black legs and a fence. Lucas--Kanade follows these
+corners well across the whole sequence, the moving ones stand out
+clearly from the still background, and the cluster covers most of
+the object. Three easy true positives.
+
+\paragraph{Squirrel --- where optical flow saves us.} The squirrel
+is only about $1\%$ of the image, so it is the hardest case. SIFT
+gave up on it (IoU $0.31$, our only failure with SIFT) because
+SIFT wants stable scale-space extrema and the fur does not give
+any. Shi--Tomasi is happier: it just needs a corner with two
+strong gradient directions, and the squirrel's eyes, ears and tree
+contact points give a few of those. We get only five moving
+tracks but they all sit on the squirrel, so the box is tight and
+correct (IoU $0.62$).
+
+\paragraph{Frog --- where CLAHE saves us.} Without CLAHE the frog
+was our only failure (IoU $0.28$). Its body is wet and smooth,
+almost no local gradient, so Shi--Tomasi found barely any corners
+on the body itself --- only on the limbs and the branch next to
+it. The cluster covered the limbs only and the box was too tight.
+After we add CLAHE the dim greenish skin gets a local contrast
+boost, Shi--Tomasi places a handful of corners along the back and
+sides too, the cluster covers the whole body, and the box reaches
+IoU $0.53$. This is the fix Riccardo suggested when he saw the
+failure.
+
+\paragraph{What we could still try.} Grow the cluster bounding box
+by the spread of dynamic corners (so a tight cluster would still
+expand to a plausible object size), or detect new corners
+periodically instead of only on frame 0. Both are nice-to-haves
+now that all five sequences are true positives.
+
+
 \section{Code and credit}
 
 \paragraph{Code layout.} \texttt{src/feature\_tracker.cpp}
-(corners + Lucas--Kanade + median-flow), \texttt{motion\_segmenter.cpp}
-(displacement classifier), \texttt{bbox\_estimator.cpp} (clustering
-and bounding box), \texttt{silhouette\_refiner.cpp} (optional
-shrink), \texttt{evaluator.cpp} (IoU), \texttt{main.cpp} (entry
-point), \texttt{include/dod.hpp}, \texttt{CMakeLists.txt}. Build with
+(corners + Lucas--Kanade + median-flow),
+\texttt{motion\_segmenter.cpp} (displacement classifier),
+\texttt{bbox\_estimator.cpp} (clustering and bounding box),
+\texttt{silhouette\_refiner.cpp} (optional shrink),
+\texttt{evaluator.cpp} (IoU), \texttt{main.cpp} (entry point),
+\texttt{include/dod.hpp}, \texttt{CMakeLists.txt}. Build with
 \texttt{cmake -S . -B build \&\& cmake --build build}; run with
 \texttt{./build/detect dataset output}. OpenCV~4 is the only
 dependency. No deep learning.
 
-\paragraph{Contribution.} \textbf{Mahdi Gheysari} ---
+\paragraph{Contribution.}
+{\sloppy
+\textbf{Mahdi Gheysari} ---
 \texttt{feature\_tracker.cpp}, \texttt{main.cpp}.
-\textbf{Filippo Businaro} --- \texttt{motion\_segmenter.cpp},
-\texttt{silhouette\_refiner.cpp}, \texttt{evaluator.cpp}.
-\textbf{Riccardo Pesce} --- \texttt{bbox\_estimator.cpp},
-\texttt{include/dod.hpp}. Design, parameter tuning and the report
-were shared. Total time around $32$\,h.
+\textbf{Filippo Businaro} ---
+\texttt{motion\_segmenter.cpp},
+\texttt{silhouette\_refiner.cpp},
+\texttt{evaluator.cpp}.
+\textbf{Riccardo Pesce} ---
+\texttt{bbox\_estimator.cpp},
+\texttt{include/dod.hpp}.
+Design, parameter tuning and the report were shared.
+Total time around $32$\,h.\par}
 
 \end{document}

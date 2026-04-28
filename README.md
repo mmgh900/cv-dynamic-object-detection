@@ -9,22 +9,25 @@ a moving object in the first frame of an RGB image sequence using
 The brief recommends "sparse local features + robust feature matching
 or **optical flow**". We follow the optical-flow path:
 
-1. **Shi–Tomasi corners on frame 0** – `cv::goodFeaturesToTrack`
+1. **CLAHE preprocessing** – local histogram equalisation
+   (`cv::createCLAHE`, clip 0.5, 8×8 tiles) on every frame so the
+   next stage can find corners on smooth/dim objects (the frog).
+2. **Shi–Tomasi corners on frame 0** – `cv::goodFeaturesToTrack`
    (maxCorners 1500, qualityLevel 0.005, minDistance 5, blockSize 7).
-2. **Pyramidal Lucas–Kanade tracking** – `cv::calcOpticalFlowPyrLK`
+3. **Pyramidal Lucas–Kanade tracking** – `cv::calcOpticalFlowPyrLK`
    propagates each corner frame-by-frame (window 21×21, 3 levels)
    with a forward–backward consistency filter (max round-trip drift
    1.5 px).
-3. **Median-flow subtraction** – per frame, the median displacement
+4. **Median-flow subtraction** – per frame, the median displacement
    across surviving tracks is subtracted to cancel constant camera
    motion (covers the slight car pan).
-4. **Dynamic classification** – average residual displacement per
+5. **Dynamic classification** – average residual displacement per
    track; keep the top 15% above `max(8 px, 4 × median)`. The floor
    rejects swaying leaves, distant walkers, and near-static objects
    (e.g. the almost-static sheep) as required by the brief.
-5. **Clustering + bbox** – DBSCAN-like proximity clustering, neighbour
+6. **Clustering + bbox** – DBSCAN-like proximity clustering, neighbour
    merging, MAD outlier rejection at 2.5σ, padded bounding box.
-6. **Silhouette refinement (gated)** – phase-correlation warped frame
+7. **Silhouette refinement (gated)** – phase-correlation warped frame
    differencing + Otsu + morphology + largest connected component,
    accepted only when meaningfully smaller than the coarse box.
 
@@ -37,13 +40,13 @@ optical-flow front-end.
 
 | category | IoU | TP@0.5 |
 |----------|-----|--------|
-| bird     | 0.631 | yes |
-| car      | 0.638 | yes |
-| frog     | 0.282 | no  |
-| sheep    | 0.673 | yes |
+| bird     | 0.578 | yes |
+| car      | 0.773 | yes |
+| frog     | 0.532 | yes |
+| sheep    | 0.796 | yes |
 | squirrel | 0.616 | yes |
 
-**mIoU = 0.568, accuracy@0.5 = 0.80 (4/5).**
+**mIoU = 0.659, accuracy@0.5 = 1.00 (5/5).**
 
 ## Build and run
 
