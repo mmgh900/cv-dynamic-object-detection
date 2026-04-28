@@ -104,28 +104,6 @@ squirrel & $23\times31$   & $ 28\times 37$ & 0.616 & yes \\
 \caption{Results on the five provided sequences.}
 \end{table}
 
-\begin{figure*}[!b]
-\centering
-\begin{subfigure}{.195\textwidth}\centering
-  \includegraphics[height=3.2cm,keepaspectratio]{figures/bird_overlay.png}\\\scriptsize bird
-\end{subfigure}\hfill
-\begin{subfigure}{.195\textwidth}\centering
-  \includegraphics[height=3.2cm,keepaspectratio]{figures/car_overlay.png}\\\scriptsize car
-\end{subfigure}\hfill
-\begin{subfigure}{.195\textwidth}\centering
-  \includegraphics[height=3.2cm,keepaspectratio]{figures/frog_overlay.png}\\\scriptsize frog
-\end{subfigure}\hfill
-\begin{subfigure}{.195\textwidth}\centering
-  \includegraphics[height=3.2cm,keepaspectratio]{figures/sheep_overlay.png}\\\scriptsize sheep
-\end{subfigure}\hfill
-\begin{subfigure}{.195\textwidth}\centering
-  \includegraphics[height=3.2cm,keepaspectratio]{figures/squirrel_overlay.png}\\\scriptsize squirrel
-\end{subfigure}
-\caption{First frame of each sequence. Green = ground truth box,
-red = our prediction, orange dots = corners we detected on frame
-0, green lines = trajectories of the corners we classified as
-moving.}
-\end{figure*}
 
 \section{Robustness}
 
@@ -227,5 +205,24 @@ dependency. No deep learning.
 \texttt{include/dod.hpp}.
 Design, parameter tuning and the report were shared.
 Total time around $32$\,h.\par}
+
+\onecolumn
+\clearpage
+\begin{figure}[H]
+\centering
+\includegraphics[height=5.8cm,keepaspectratio]{figures/bird_overlay.png}\hspace{6pt}
+\includegraphics[height=5.8cm,keepaspectratio]{figures/squirrel_overlay.png}\\
+{\small bird (IoU $0.578$) \hspace{4em} squirrel (IoU $0.616$)}\\[10pt]
+\includegraphics[height=4.6cm,keepaspectratio]{figures/car_overlay.png}\\
+{\small car (IoU $0.773$)}\\[10pt]
+\includegraphics[height=4.6cm,keepaspectratio]{figures/frog_overlay.png}\\
+{\small frog (IoU $0.532$)}\\[10pt]
+\includegraphics[height=4.6cm,keepaspectratio]{figures/sheep_overlay.png}\\
+{\small sheep (IoU $0.796$)}
+\caption{First frame of each sequence. Green = ground truth box,
+red = our prediction, orange dots = corners we detected on frame
+0, green lines = trajectories of the corners we classified as
+moving.}
+\end{figure}
 
 \end{document}
